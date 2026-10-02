@@ -28,7 +28,10 @@ setup(
             '2_0_a_image_publisher = turtlebot4_beep.2_0_a_image_publisher:main',
             '2_0_b_image_subscriber = turtlebot4_beep.2_0_b_image_subscriber:main',
             '2_0_c_data_publisher = turtlebot4_beep.2_0_c_data_publisher:main',
-            '2_0_d_data_subscriber = turtlebot4_beep.2_0_d_data_subscriber:main'
+            '2_0_d_data_subscriber = turtlebot4_beep.2_0_d_data_subscriber:main',
+            '2_1_d_capture_image = turtlebot4_beep.2_1_d_capture_image:main',
+            'depth_checker = turtlebot4_beep.depth_checker:main',
+            '2_1_e_capture_comp_image = turtlebot4_beep.2_1_e_capture_comp_image:main',
 
         ],
     },
