@@ -29,6 +29,11 @@ setup(
     ],
     install_requires=['setuptools'],
     zip_safe=True,
+    extras_require={
+        'test': [
+            'pytest',
+        ],
+    },
     maintainer='maymayko',
     maintainer_email='maymayko9559@gmail.com',
     description='AMR approach and car following control',
@@ -36,6 +41,7 @@ setup(
     entry_points={
         'console_scripts': [
             'mission_manager = mini_control.mission_manager:main',
+            'approach = mini_control.approach:main',
         ],
     },
 )
