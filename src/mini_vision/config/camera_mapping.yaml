@@ -1,23 +1,19 @@
+# 이 파일의 0은 자리 표시자다. 실제 측정 전 calibrated를 true로 바꾸지 않는다.
 webcam_localizer:
   ros__parameters:
-    # 변환한 위치를 표현할 좌표계
+    calibrated: false
     map_frame: "map"
+    calibration_width: 640
+    calibration_height: 480
+    max_age: 0.5  # 예시: 촬영 후 0.5초가 넘은 감지 결과는 사용하지 않음
 
-    # 웹캠 감지 결과를 받는 토픽
-    detection_topic: "/webcam/detections"
+    # 바닥 사각형 경계를 따라 네 점을 시계/반시계 방향으로 기록한다.
+    # 픽셀 좌표: [u1,v1, u2,v2, u3,v3, u4,v4]
+    pixel_points: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    # 위와 정확히 같은 순서의 map 좌표, 단위 m: [x1,y1, ...]
+    map_points: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
-    # 변환한 자동차 지도 위치를 보내는 토픽
-    position_topic: "/target/map_position"
-
-    # 아래 기준점은 직접 측정한 뒤 추가한다.
-    # 같은 순서의 픽셀 좌표와 지도 좌표가 서로 대응해야 한다.
-    #
-    # 픽셀 좌표: 웹캠 영상에서 확인한 u, v
-    # 지도 좌표: AMR 지도에서 확인한 x, y (미터)
-    #
-    # ROS 파라미터 배열로 읽기 쉽게 한 줄로 펼쳐 저장한다.
-    # pixel_points: [u1, v1, u2, v2, u3, v3, u4, v4]
-    # map_points:   [x1, y1, x2, y2, x3, y3, x4, y4]
-
-    # 웹캠 위치·각도·영상 해상도가 바뀌면 보정을 다시 확인한다.
-    # 코드에서는 보정값이 없거나 잘못된 경우 위치 발행을 막는다.
+    # 렌즈 왜곡 보정값이 있다면 사용한다. 미사용 때 왜곡 오차가 남는다.
+    undistort: false
+    camera_matrix: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    distortion: [0.0, 0.0, 0.0, 0.0, 0.0]
