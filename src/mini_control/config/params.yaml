@@ -42,3 +42,21 @@ mission_manager:
     # handover_detection_count: ...
 
     # 코드에서는 필수 설정이 없으면 이동을 시작하지 않도록 한다.
+
+approach:
+  ros__parameters:
+    # 코드 기본값은 namespace 없는 중립 값이고, 여기서 /robot2 기준으로 덮어쓴다.
+    nav_action: "/robot2/navigate_to_pose"
+    pose_topic: "/robot2/amcl_pose"
+
+    # mission_manager / localizer 와 맞춘 팀 인터페이스 토픽
+    target_topic: "/approach/target_point"
+    cancel_topic: "/approach/cancel"
+    status_topic: "/approach/status"
+
+    map_frame: "map"
+
+    # 자동차 앞에서 멈출 거리 (미터)
+    approach_distance: 0.5
+    # 이동 중 자동차가 이만큼 이상 움직여야 goal 을 교체 (미터)
+    retarget_threshold: 0.3
