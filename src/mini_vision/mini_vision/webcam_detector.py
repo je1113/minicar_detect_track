@@ -46,7 +46,7 @@ class WebcamDetector(Node):
             raise ValueError('rate_hz > 0, 0 < confidence <= 1 이어야 합니다.')
 
         self.model = YOLO(self.p['model_path'])
-        if self.p['target_class'] not in self.model.names.values():
+        if self.p['target_class'] not in self.model.names.values():    
             raise ValueError(f"모델에 클래스가 없습니다: {self.p['target_class']}")
         self.camera = cv2.VideoCapture(self.p['camera_index'], cv2.CAP_V4L2)
         if not self.camera.isOpened():
@@ -72,7 +72,7 @@ class WebcamDetector(Node):
             self.publisher.publish(message)
             self.get_logger().warning('웹캠 영상 읽기 실패', throttle_duration_sec=3.0)
             return
-        # 보정과 다른 해상도를 조용히 사용하지 않는다.
+
         if frame.shape[:2] != (self.p['image_height'], self.p['image_width']):
             self.publisher.publish(message)
             self.get_logger().error('실제 해상도와 설정이 다릅니다.', throttle_duration_sec=3.0)
