@@ -1,18 +1,289 @@
-# 역할:
-# 프로젝트 노드와 설정을 한 번에 실행한다.
+"""
+프로젝트 전체 ROS2 노드를 한 번에 실행한다.
 
-# 작성할 내용:
-# 1. mini_vision과 mini_control의 설치 경로를 찾는다.
-# 2. 모델 경로, 웹캠 번호, AMR 카메라 토픽 등을 인자로 받는다.
-# 3. webcam_detector 노드를 실행한다.
-# 4. webcam_localizer 노드에 보정 설정을 전달한다.
-# 5. amr_detector 노드에 AMR 카메라 토픽을 전달한다.
-# 6. mission_manager 노드에 제어 설정을 전달한다.
-# 7. 실제 로봇의 namespace와 토픽에 맞춰 연결한다.
+실행:
+- mini_vision / webcam_detector
+- mini_vision / webcam_localizer
+- mini_vision / amr_detector
+- mini_control / approach
+- mini_control / mission_manager
 
-# Nav2:
-# 로봇 bringup에서 이미 실행 중이면 중복 실행하지 않는다.
-# 이 launch에서 실행할지는 팀의 실행 방식에 맞춰 정한다.
+Nav2는 TurtleBot4 bringup에서 이미 실행한다고 보고
+이 launch에서는 중복 실행하지 않는다.
+"""
 
-# generate_launch_description():
-# 실행할 노드와 인자를 LaunchDescription으로 반환한다.
+import os
+
+from ament_index_python.packages import get_package_share_directory
+
+from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration
+
+from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
+
+
+def generate_launch_description():
+
+    # =========================================================
+    # 1. 패키지 설치 경로
+    # =========================================================
+    mini_vision_share = get_package_share_directory(
+        'mini_vision'
+    )
+
+    mini_control_share = get_package_share_directory(
+        'mini_control'
+    )
+
+    # =========================================================
+    # 2. 설정 / 모델 경로
+    # =========================================================
+    camera_mapping_file = os.path.join(
+        mini_vision_share,
+        'config',
+        'camera_mapping.yaml'
+    )
+
+    control_params_file = os.path.join(
+        mini_control_share,
+        'config',
+        'params.yaml'
+    )
+
+    webcam_model_default = os.path.join(
+        mini_vision_share,
+        'models',
+        'webcam_best.pt'
+    )
+
+    amr_model_default = os.path.join(
+        mini_vision_share,
+        'models',
+        'amr_best.pt'
+    )
+
+    # =========================================================
+    # 3. Launch 인자
+    # =========================================================
+    webcam_model_arg = DeclareLaunchArgument(
+        'webcam_model_path',
+        default_value=webcam_model_default
+    )
+
+    amr_model_arg = DeclareLaunchArgument(
+        'amr_model_path',
+        default_value=amr_model_default
+    )
+
+    camera_index_arg = DeclareLaunchArgument(
+        'camera_index',
+        default_value='2'
+    )
+
+    amr_camera_topic_arg = DeclareLaunchArgument(
+        'amr_camera_topic',
+        default_value='/robot2/oakd/rgb/preview/image_raw'
+    )
+
+    cmd_vel_topic_arg = DeclareLaunchArgument(
+        'cmd_vel_topic',
+        default_value='/robot2/cmd_vel'
+    )
+
+    target_distance_arg = DeclareLaunchArgument(
+        'target_distance',
+        default_value='0.8'
+    )
+
+    min_distance_arg = DeclareLaunchArgument(
+        'min_distance',
+        default_value='0.5'
+    )
+
+    linear_gain_arg = DeclareLaunchArgument(
+        'linear_gain',
+        default_value='0.5'
+    )
+
+    angular_gain_arg = DeclareLaunchArgument(
+        'angular_gain',
+        default_value='1.0'
+    )
+
+    max_linear_speed_arg = DeclareLaunchArgument(
+        'max_linear_speed',
+        default_value='0.31'
+    )
+
+    max_angular_speed_arg = DeclareLaunchArgument(
+        'max_angular_speed',
+        default_value='1.0'
+    )
+
+    detection_timeout_arg = DeclareLaunchArgument(
+        'detection_timeout',
+        default_value='0.5'
+    )
+
+    handover_detection_count_arg = DeclareLaunchArgument(
+        'handover_detection_count',
+        default_value='3'
+    )
+
+    # =========================================================
+    # 4. 고정 웹캠 YOLO 감지
+    # =========================================================
+    webcam_detector_node = Node(
+        package='mini_vision',
+        executable='webcam_detector',
+        name='webcam_detector',
+        output='screen',
+        parameters=[
+            {
+                'model_path': LaunchConfiguration(
+                    'webcam_model_path'
+                ),
+                'camera_index': ParameterValue(
+                    LaunchConfiguration('camera_index'),
+                    value_type=int
+                ),
+            }
+        ]
+    )
+
+    # =========================================================
+    # 5. 웹캠 픽셀 → map 위치 변환
+    # =========================================================
+    webcam_localizer_node = Node(
+        package='mini_vision',
+        executable='webcam_localizer',
+        name='webcam_localizer',
+        output='screen',
+        parameters=[
+            camera_mapping_file
+        ]
+    )
+
+    # =========================================================
+    # 6. TurtleBot4 AMR 카메라 YOLO 감지
+    # =========================================================
+    amr_detector_node = Node(
+        package='mini_vision',
+        executable='amr_detector',
+        name='amr_detector',
+        output='screen',
+        parameters=[
+            {
+                'model_path': LaunchConfiguration(
+                    'amr_model_path'
+                ),
+                'camera_topic': LaunchConfiguration(
+                    'amr_camera_topic'
+                ),
+            }
+        ]
+    )
+
+    # =========================================================
+    # 7. Nav2 접근 노드
+    #
+    # 실제 Nav2 자체는 여기서 실행하지 않는다.
+    # params.yaml의 /robot2 설정을 approach에 전달한다.
+    # =========================================================
+    approach_node = Node(
+        package='mini_control',
+        executable='approach',
+        name='approach',
+        output='screen',
+        parameters=[
+            control_params_file
+        ]
+    )
+
+    # =========================================================
+    # 8. 추종 / 상태 전환 통합 노드
+    # =========================================================
+    mission_manager_node = Node(
+        package='mini_control',
+        executable='mission_manager',
+        name='mission_manager',
+        output='screen',
+        parameters=[
+            control_params_file,
+            {
+                'cmd_vel_topic': LaunchConfiguration(
+                    'cmd_vel_topic'
+                ),
+
+                'target_distance': ParameterValue(
+                    LaunchConfiguration('target_distance'),
+                    value_type=float
+                ),
+
+                'min_distance': ParameterValue(
+                    LaunchConfiguration('min_distance'),
+                    value_type=float
+                ),
+
+                'linear_gain': ParameterValue(
+                    LaunchConfiguration('linear_gain'),
+                    value_type=float
+                ),
+
+                'angular_gain': ParameterValue(
+                    LaunchConfiguration('angular_gain'),
+                    value_type=float
+                ),
+
+                'max_linear_speed': ParameterValue(
+                    LaunchConfiguration('max_linear_speed'),
+                    value_type=float
+                ),
+
+                'max_angular_speed': ParameterValue(
+                    LaunchConfiguration('max_angular_speed'),
+                    value_type=float
+                ),
+
+                'detection_timeout': ParameterValue(
+                    LaunchConfiguration('detection_timeout'),
+                    value_type=float
+                ),
+
+                'handover_detection_count': ParameterValue(
+                    LaunchConfiguration(
+                        'handover_detection_count'
+                    ),
+                    value_type=int
+                ),
+            }
+        ]
+    )
+
+    # =========================================================
+    # 9. 전체 노드 반환
+    # =========================================================
+    return LaunchDescription([
+        webcam_model_arg,
+        amr_model_arg,
+        camera_index_arg,
+        amr_camera_topic_arg,
+        cmd_vel_topic_arg,
+
+        target_distance_arg,
+        min_distance_arg,
+        linear_gain_arg,
+        angular_gain_arg,
+        max_linear_speed_arg,
+        max_angular_speed_arg,
+        detection_timeout_arg,
+        handover_detection_count_arg,
+
+        webcam_detector_node,
+        webcam_localizer_node,
+        amr_detector_node,
+        approach_node,
+        mission_manager_node,
+    ])
