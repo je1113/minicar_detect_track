@@ -2,17 +2,30 @@
 역할:
 웹캠 발견 → AMR 접근 → AMR 카메라 인계 → 추종 순서를 관리한다.
 
-현재는 webcam_localizer.py, amr_detector.py, approach.py의
+현재는 webcam_localizer.py, amr_detector.py의
 실제 구현이 완료되기 전이므로 ROS2 연결 틀을 구성한다.
+
+approach 연결:
+  웹캠 좌표를 approach 목표 토픽으로 넘기고,
+  approach 상태(ARRIVED/FAILED/CANCELED)로 다음 상태를 정한다.
 """
 
 import rclpy
 from rclpy.node import Node
 
 from geometry_msgs.msg import PointStamped, TwistStamped
+from std_msgs.msg import Empty, String
 from vision_msgs.msg import Detection2DArray
 
+from .approach import ApproachStatus
 from .follow import compute_velocity, stop_velocity
+
+# approach가 이동을 끝냈음을 뜻하는 상태
+APPROACH_FINISHED = (
+    ApproachStatus.ARRIVED,
+    ApproachStatus.FAILED,
+    ApproachStatus.CANCELED,
+)
 
 
 class MissionManager(Node):
@@ -36,6 +49,21 @@ class MissionManager(Node):
         self.declare_parameter(
             'cmd_vel_topic',
             '/robot2/cmd_vel'
+        )
+
+        self.declare_parameter(
+            'approach_target_topic',
+            '/approach/target_point'
+        )
+
+        self.declare_parameter(
+            'approach_cancel_topic',
+            '/approach/cancel'
+        )
+
+        self.declare_parameter(
+            'approach_status_topic',
+            '/approach/status'
         )
 
         self.declare_parameter(
@@ -101,6 +129,24 @@ class MissionManager(Node):
         self.cmd_vel_topic = (
             self.get_parameter(
                 'cmd_vel_topic'
+            ).value
+        )
+
+        self.approach_target_topic = (
+            self.get_parameter(
+                'approach_target_topic'
+            ).value
+        )
+
+        self.approach_cancel_topic = (
+            self.get_parameter(
+                'approach_cancel_topic'
+            ).value
+        )
+
+        self.approach_status_topic = (
+            self.get_parameter(
+                'approach_status_topic'
             ).value
         )
 
@@ -180,7 +226,15 @@ class MissionManager(Node):
         self.last_detection_time = None
 
         # =====================================================
-        # 6. Subscriber
+        # 6. approach 상태
+        # =====================================================
+        self.approach_status = None
+
+        # AMR 카메라가 먼저 자동차를 찾아 Nav2 취소를 요청한 상태
+        self.handover_cancel_requested = False
+
+        # =====================================================
+        # 7. Subscriber
         # =====================================================
         self.target_position_sub = self.create_subscription(
             PointStamped,
@@ -196,8 +250,32 @@ class MissionManager(Node):
             10
         )
 
+        # approach는 상태를 transient local로 발행하지만,
+        # 이전 실행의 오래된 상태를 받지 않도록 volatile로 구독한다.
+        self.approach_status_sub = self.create_subscription(
+            String,
+            self.approach_status_topic,
+            self.approach_status_callback,
+            10
+        )
+
         # =====================================================
-        # 7. TurtleBot4 cmd_vel Publisher
+        # 8. approach Publisher
+        # =====================================================
+        self.approach_target_pub = self.create_publisher(
+            PointStamped,
+            self.approach_target_topic,
+            10
+        )
+
+        self.approach_cancel_pub = self.create_publisher(
+            Empty,
+            self.approach_cancel_topic,
+            10
+        )
+
+        # =====================================================
+        # 9. TurtleBot4 cmd_vel Publisher
         # =====================================================
         self.cmd_vel_pub = self.create_publisher(
             TwistStamped,
@@ -206,7 +284,7 @@ class MissionManager(Node):
         )
 
         # =====================================================
-        # 8. 제어 Loop
+        # 10. 제어 Loop
         # =====================================================
         self.timer = self.create_timer(
             0.1,
@@ -231,9 +309,64 @@ class MissionManager(Node):
                 'SEARCHING -> APPROACHING'
             )
 
-            # TODO:
-            # approach.py 구현 완료 후
-            # 여기서 접근 목표 전송
+        # 취소를 요청한 뒤 새 목표를 보내면 Nav2가 다시 움직이므로 보내지 않는다.
+        if (
+            self.state == 'APPROACHING'
+            and not self.handover_cancel_requested
+        ):
+            # 계속 들어오는 좌표의 goal 교체 여부는 approach가 판단한다.
+            self.approach_target_pub.publish(msg)
+
+    # =========================================================
+    # approach 상태 수신
+    # =========================================================
+    def approach_status_callback(self, msg):
+
+        try:
+            status = ApproachStatus(msg.data)
+        except ValueError:
+            self.get_logger().warning(
+                f'알 수 없는 approach 상태: {msg.data}'
+            )
+            return
+
+        self.approach_status = status
+
+        if self.state != 'APPROACHING':
+            return
+
+        if status not in APPROACH_FINISHED:
+            return
+
+        # AMR 카메라가 이미 자동차를 보고 있으므로
+        # Nav2가 어떻게 끝났든 추종 인계로 넘어간다.
+        if self.handover_cancel_requested:
+            self.handover_cancel_requested = False
+            self.notify_approach_complete()
+            return
+
+        if status == ApproachStatus.ARRIVED:
+            self.notify_approach_complete()
+            return
+
+        self.state = 'SEARCHING'
+
+        self.get_logger().warning(
+            f'APPROACHING -> SEARCHING (approach {status.value})'
+        )
+
+    # =========================================================
+    # approach 이동 취소 요청
+    # =========================================================
+    def cancel_approach(self):
+
+        self.handover_cancel_requested = True
+
+        self.approach_cancel_pub.publish(Empty())
+
+        self.get_logger().info(
+            'AMR 카메라 감지, approach 취소 요청'
+        )
 
     # =========================================================
     # AMR 카메라 감지 결과 수신
@@ -322,6 +455,16 @@ class MissionManager(Node):
         # Nav2가 제어
         # -----------------------------------------------------
         if self.state == 'APPROACHING':
+
+            # approach가 MOVING을 알리기 전에 취소하면 무시되므로 기다린다.
+            if (
+                not self.handover_cancel_requested
+                and self.approach_status == ApproachStatus.MOVING
+                and self.target_detected
+                and self.detection_is_fresh()
+            ):
+                self.cancel_approach()
+
             return
 
         # -----------------------------------------------------
