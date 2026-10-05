@@ -36,6 +36,7 @@ setup(
     entry_points={
         'console_scripts': [
             'webcam_detector = mini_vision.webcam_detector:main',
+            'webcam_detector_topic = mini_vision.webcam_detector_topic:main',
             'webcam_localizer = mini_vision.webcam_localizer:main',
             'amr_detector = mini_vision.amr_detector:main',
         ],
