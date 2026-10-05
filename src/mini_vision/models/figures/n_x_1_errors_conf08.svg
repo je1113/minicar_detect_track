@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 360" width="720" height="360" role="img" aria-label="① 오류 개수 — conf 0.8, valid+test 46장 (정답 54개)">
+<style>
+.bg{fill:#fcfcfb}.t1{fill:#0b0b0b}.t2{fill:#52514e}.t3{fill:#8a8984}
+.grid{stroke:#e4e3de;stroke-width:1}.base{stroke:#b9b8b2;stroke-width:1}
+.sel{fill:#2a78d6}.ok{fill:#8fb8ea}.out{fill:#d3d2cc}.fn{fill:#eb6834}.fp{fill:#4a3aa7}.ref{stroke:#e34948;stroke-width:1.5;stroke-dasharray:5 4}
+.reft{fill:#c43b3a}
+text{font-family:-apple-system,'Segoe UI','Noto Sans KR','Malgun Gothic','Apple SD Gothic Neo',sans-serif}
+@media (prefers-color-scheme: dark){
+.bg{fill:#1a1a19}.t1{fill:#ffffff}.t2{fill:#c3c2b7}.t3{fill:#8f8e86}
+.grid{stroke:#33332f}.base{stroke:#5a5954}.sel{fill:#3987e5}.ok{fill:#2c5687}.out{fill:#45443f}.fn{fill:#d95926}.fp{fill:#9085e9}.ref{stroke:#e66767}.reft{fill:#e66767}}
+</style>
+<rect class="bg" width="720" height="360" rx="8"/>
+<text class="t1" x="20" y="32" font-size="17" font-weight="600">① 오류 개수 — conf 0.8, valid+test 46장 (정답 54개)</text>
+<text class="t2" x="20" y="54" font-size="13">오류 0개는 yolov8s · yolov8m 둘뿐</text>
+<rect class="fp" x="20" y="70" width="12" height="12" rx="2"/>
+<text class="t2" x="38" y="80.5" font-size="12.5">오탐 FP</text>
+<rect class="fn" x="95" y="70" width="12" height="12" rx="2"/>
+<text class="t2" x="113" y="80.5" font-size="12.5">미탐 FN</text>
+<line class="grid" x1="150.0" x2="150.0" y1="98" y2="288.0"/>
+<text class="t3" x="150.0" y="306.0" font-size="11.5" text-anchor="middle">0</text>
+<line class="grid" x1="262.5" x2="262.5" y1="98" y2="288.0"/>
+<text class="t3" x="262.5" y="306.0" font-size="11.5" text-anchor="middle">5</text>
+<line class="grid" x1="375.0" x2="375.0" y1="98" y2="288.0"/>
+<text class="t3" x="375.0" y="306.0" font-size="11.5" text-anchor="middle">10</text>
+<line class="grid" x1="487.5" x2="487.5" y1="98" y2="288.0"/>
+<text class="t3" x="487.5" y="306.0" font-size="11.5" text-anchor="middle">15</text>
+<line class="grid" x1="600.0" x2="600.0" y1="98" y2="288.0"/>
+<text class="t3" x="600.0" y="306.0" font-size="11.5" text-anchor="middle">20</text>
+<text class="t3" x="600" y="322.0" font-size="11.5" text-anchor="end">오류 개수 (FP + FN)</text>
+<text class="t2" x="138" y="122.0" font-size="13.5" text-anchor="end" font-weight="400">yolov8n</text>
+<rect class="fp" x="150" y="104" width="20.5" height="26"/>
+<path class="fn" d="M172.5,104 H258.5 Q262.5,104 262.5,108 V126 Q262.5,130 258.5,130 H172.5 Z"/>
+<text class="t1" x="270.5" y="122.0" font-size="13" font-weight="400">5개 (FP 1 + FN 4)</text>
+<text class="t1" x="138" y="160.0" font-size="13.5" text-anchor="end" font-weight="600">yolov8s</text>
+
+<text class="t1" x="158.0" y="160.0" font-size="13" font-weight="600">0개 ✔</text>
+<text class="t2" x="138" y="198.0" font-size="13.5" text-anchor="end" font-weight="400">yolov8m</text>
+
+<text class="t1" x="158.0" y="198.0" font-size="13" font-weight="400">0개 ✔</text>
+<text class="t2" x="138" y="236.0" font-size="13.5" text-anchor="end" font-weight="400">yolov8l</text>
+<path class="fn" d="M150.0,218 H528.5 Q532.5,218 532.5,222 V240 Q532.5,244 528.5,244 H150.0 Z"/>
+<text class="t1" x="540.5" y="236.0" font-size="13" font-weight="400">17개 (FP 0 + FN 17)</text>
+<text class="t2" x="138" y="274.0" font-size="13.5" text-anchor="end" font-weight="400">yolov8x</text>
+<path class="fn" d="M150.0,256 H191.0 Q195.0,256 195.0,260 V278 Q195.0,282 191.0,282 H150.0 Z"/>
+<text class="t1" x="203.0" y="274.0" font-size="13" font-weight="400">2개 (FP 0 + FN 2)</text>
+<line class="base" x1="150" x2="150" y1="98" y2="288.0"/>
+<text class="t3" x="20" y="346" font-size="12">conf 0.25에서도 s의 오탐은 1개(신뢰도 0.29)라 임계값으로 걸러지고, n의 오탐은 0.82라 걸러지지 않음.</text>
+</svg>

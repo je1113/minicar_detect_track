@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 334" width="720" height="334" role="img" aria-label="② GPU 추론 시간 (이미지 1장, 전·후처리 포함)">
+<style>
+.bg{fill:#fcfcfb}.t1{fill:#0b0b0b}.t2{fill:#52514e}.t3{fill:#8a8984}
+.grid{stroke:#e4e3de;stroke-width:1}.base{stroke:#b9b8b2;stroke-width:1}
+.sel{fill:#2a78d6}.ok{fill:#8fb8ea}.out{fill:#d3d2cc}.fn{fill:#eb6834}.fp{fill:#4a3aa7}.ref{stroke:#e34948;stroke-width:1.5;stroke-dasharray:5 4}
+.reft{fill:#c43b3a}
+text{font-family:-apple-system,'Segoe UI','Noto Sans KR','Malgun Gothic','Apple SD Gothic Neo',sans-serif}
+@media (prefers-color-scheme: dark){
+.bg{fill:#1a1a19}.t1{fill:#ffffff}.t2{fill:#c3c2b7}.t3{fill:#8f8e86}
+.grid{stroke:#33332f}.base{stroke:#5a5954}.sel{fill:#3987e5}.ok{fill:#2c5687}.out{fill:#45443f}.fn{fill:#d95926}.fp{fill:#9085e9}.ref{stroke:#e66767}.reft{fill:#e66767}}
+</style>
+<rect class="bg" width="720" height="334" rx="8"/>
+<text class="t1" x="20" y="32" font-size="17" font-weight="600">② GPU 추론 시간 (이미지 1장, 전·후처리 포함)</text>
+<text class="t2" x="20" y="54" font-size="13">5개 모두 32ms 이하(10Hz 한계 100ms의 1/3 이하)라 속도로는 탈락 없음 → 오류 0개인 s·m 중 s가 약 2.7배 빠름</text>
+<line class="grid" x1="150.0" x2="150.0" y1="72" y2="262.0"/>
+<text class="t3" x="150.0" y="280.0" font-size="11.5" text-anchor="middle">0</text>
+<line class="grid" x1="278.57142857142856" x2="278.57142857142856" y1="72" y2="262.0"/>
+<text class="t3" x="278.57142857142856" y="280.0" font-size="11.5" text-anchor="middle">10</text>
+<line class="grid" x1="407.1428571428571" x2="407.1428571428571" y1="72" y2="262.0"/>
+<text class="t3" x="407.1428571428571" y="280.0" font-size="11.5" text-anchor="middle">20</text>
+<line class="grid" x1="535.7142857142857" x2="535.7142857142857" y1="72" y2="262.0"/>
+<text class="t3" x="535.7142857142857" y="280.0" font-size="11.5" text-anchor="middle">30</text>
+<text class="t3" x="600" y="296.0" font-size="11.5" text-anchor="end">ms (5라운드 중앙값)</text>
+<text class="t2" x="138" y="96.0" font-size="13.5" text-anchor="end" font-weight="400">yolov8n</text>
+<path class="out" d="M150,78 H188.42857142857142 Q192.42857142857142,78 192.42857142857142,82 V100 Q192.42857142857142,104 188.42857142857142,104 H150 Z"/>
+<text class="t1" x="200.42857142857142" y="96.0" font-size="13" font-weight="400">3.3ms</text>
+<text class="t1" x="138" y="134.0" font-size="13.5" text-anchor="end" font-weight="600">yolov8s</text>
+<path class="sel" d="M150,116 H205.14285714285714 Q209.14285714285714,116 209.14285714285714,120 V138 Q209.14285714285714,142 205.14285714285714,142 H150 Z"/>
+<text class="t1" x="217.14285714285714" y="134.0" font-size="13" font-weight="600">4.6ms</text>
+<text class="t2" x="138" y="172.0" font-size="13.5" text-anchor="end" font-weight="400">yolov8m</text>
+<path class="ok" d="M150,154 H308.0 Q312.0,154 312.0,158 V176 Q312.0,180 308.0,180 H150 Z"/>
+<text class="t1" x="320.0" y="172.0" font-size="13" font-weight="400">12.6ms</text>
+<text class="t2" x="138" y="210.0" font-size="13.5" text-anchor="end" font-weight="400">yolov8l</text>
+<path class="out" d="M150,192 H394.14285714285717 Q398.14285714285717,192 398.14285714285717,196 V214 Q398.14285714285717,218 394.14285714285717,218 H150 Z"/>
+<text class="t1" x="406.14285714285717" y="210.0" font-size="13" font-weight="400">19.3ms</text>
+<text class="t2" x="138" y="248.0" font-size="13.5" text-anchor="end" font-weight="400">yolov8x</text>
+<path class="out" d="M150,230 H553.5714285714286 Q557.5714285714286,230 557.5714285714286,234 V252 Q557.5714285714286,256 553.5714285714286,256 H150 Z"/>
+<text class="t1" x="565.5714285714286" y="248.0" font-size="13" font-weight="400">31.7ms</text>
+<line class="base" x1="150" x2="150" y1="72" y2="262.0"/>
+<text class="t3" x="20" y="320" font-size="12">흐린 막대 = ①에서 탈락한 모델 (참고용). 모델 크기도 s 22.5MB vs m 52.0MB.</text>
+</svg>

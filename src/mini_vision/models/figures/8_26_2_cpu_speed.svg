@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 392" width="720" height="392" role="img" aria-label="② CPU 추론 시간 (이미지 1장, 전·후처리 포함)">
+<style>
+.bg{fill:#fcfcfb}.t1{fill:#0b0b0b}.t2{fill:#52514e}.t3{fill:#8a8984}
+.grid{stroke:#e4e3de;stroke-width:1}.base{stroke:#b9b8b2;stroke-width:1}
+.sel{fill:#2a78d6}.ok{fill:#8fb8ea}.out{fill:#d3d2cc}.fn{fill:#eb6834}.fp{fill:#4a3aa7}.ref{stroke:#e34948;stroke-width:1.5;stroke-dasharray:5 4}
+.reft{fill:#c43b3a}
+text{font-family:-apple-system,'Segoe UI','Noto Sans KR','Malgun Gothic','Apple SD Gothic Neo',sans-serif}
+@media (prefers-color-scheme: dark){
+.bg{fill:#1a1a19}.t1{fill:#ffffff}.t2{fill:#c3c2b7}.t3{fill:#8f8e86}
+.grid{stroke:#33332f}.base{stroke:#5a5954}.sel{fill:#3987e5}.ok{fill:#2c5687}.out{fill:#45443f}.fn{fill:#d95926}.fp{fill:#9085e9}.ref{stroke:#e66767}.reft{fill:#e66767}}
+</style>
+<rect class="bg" width="720" height="392" rx="8"/>
+<text class="t1" x="20" y="32" font-size="17" font-weight="600">② CPU 추론 시간 (이미지 1장, 전·후처리 포함)</text>
+<text class="t2" x="20" y="54" font-size="13">①을 통과한 3개 중 yolo8이 가장 빠름 (22.9 &lt; 24.1 &lt; 30.2ms) · 모두 10Hz 한계 100ms 이내</text>
+<line class="grid" x1="150.0" x2="150.0" y1="92" y2="320.0"/>
+<text class="t3" x="150.0" y="338.0" font-size="11.5" text-anchor="middle">0</text>
+<line class="grid" x1="231.8181818181818" x2="231.8181818181818" y1="92" y2="320.0"/>
+<text class="t3" x="231.8181818181818" y="338.0" font-size="11.5" text-anchor="middle">20</text>
+<line class="grid" x1="313.6363636363636" x2="313.6363636363636" y1="92" y2="320.0"/>
+<text class="t3" x="313.6363636363636" y="338.0" font-size="11.5" text-anchor="middle">40</text>
+<line class="grid" x1="395.45454545454544" x2="395.45454545454544" y1="92" y2="320.0"/>
+<text class="t3" x="395.45454545454544" y="338.0" font-size="11.5" text-anchor="middle">60</text>
+<line class="grid" x1="477.2727272727273" x2="477.2727272727273" y1="92" y2="320.0"/>
+<text class="t3" x="477.2727272727273" y="338.0" font-size="11.5" text-anchor="middle">80</text>
+<line class="grid" x1="559.090909090909" x2="559.090909090909" y1="92" y2="320.0"/>
+<text class="t3" x="559.090909090909" y="338.0" font-size="11.5" text-anchor="middle">100</text>
+<text class="t3" x="600" y="354.0" font-size="11.5" text-anchor="end">ms (6라운드 중앙값)</text>
+<text class="t1" x="138" y="116.0" font-size="13.5" text-anchor="end" font-weight="600">yolo8</text>
+<path class="sel" d="M150,98 H239.6818181818182 Q243.6818181818182,98 243.6818181818182,102 V120 Q243.6818181818182,124 239.6818181818182,124 H150 Z"/>
+<text class="t1" x="251.6818181818182" y="116.0" font-size="13" font-weight="600">22.9ms</text>
+<text class="t2" x="138" y="154.0" font-size="13.5" text-anchor="end" font-weight="400">yolo9</text>
+<path class="out" d="M150,136 H262.1818181818182 Q266.1818181818182,136 266.1818181818182,140 V158 Q266.1818181818182,162 262.1818181818182,162 H150 Z"/>
+<text class="t1" x="274.1818181818182" y="154.0" font-size="13" font-weight="400">28.4ms</text>
+<text class="t2" x="138" y="192.0" font-size="13.5" text-anchor="end" font-weight="400">yolo10</text>
+<path class="out" d="M150,174 H238.86363636363637 Q242.86363636363637,174 242.86363636363637,178 V196 Q242.86363636363637,200 238.86363636363637,200 H150 Z"/>
+<text class="t1" x="250.86363636363637" y="192.0" font-size="13" font-weight="400">22.7ms</text>
+<text class="t2" x="138" y="230.0" font-size="13.5" text-anchor="end" font-weight="400">yolo11</text>
+<path class="ok" d="M150,212 H244.59090909090912 Q248.59090909090912,212 248.59090909090912,216 V234 Q248.59090909090912,238 244.59090909090912,238 H150 Z"/>
+<text class="t1" x="256.5909090909091" y="230.0" font-size="13" font-weight="400">24.1ms</text>
+<text class="t2" x="138" y="268.0" font-size="13.5" text-anchor="end" font-weight="400">yolo12</text>
+<path class="ok" d="M150,250 H269.54545454545456 Q273.54545454545456,250 273.54545454545456,254 V272 Q273.54545454545456,276 269.54545454545456,276 H150 Z"/>
+<text class="t1" x="281.54545454545456" y="268.0" font-size="13" font-weight="400">30.2ms</text>
+<text class="t2" x="138" y="306.0" font-size="13.5" text-anchor="end" font-weight="400">yolo26</text>
+<path class="out" d="M150,288 H236.8181818181818 Q240.8181818181818,288 240.8181818181818,292 V310 Q240.8181818181818,314 236.8181818181818,314 H150 Z"/>
+<text class="t1" x="248.8181818181818" y="306.0" font-size="13" font-weight="400">22.2ms</text>
+<line class="base" x1="150" x2="150" y1="92" y2="320.0"/>
+<line class="ref" x1="559.090909090909" x2="559.090909090909" y1="88" y2="320.0"/>
+<text class="reft" x="553.090909090909" y="84" font-size="12" text-anchor="end">10Hz 한계 100ms</text>
+<text class="t3" x="20" y="378" font-size="12">흐린 막대 = ①에서 탈락한 모델 (참고용). yolo26이 22.2ms로 가장 빠르지만 오탐 1개로 탈락.</text>
+</svg>
