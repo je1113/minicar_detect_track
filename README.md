@@ -53,8 +53,8 @@ ros2 launch turtlebot4_viz view_navigation.launch.py namespace:=/robot2
 필요한 토픽 확인:
 
 ```bash
-ros2 topic hz /robot2/oakd/rgb/preview/image_raw
-ros2 topic hz /robot2/oakd/stereo/image_raw
+ros2 topic hz /robot2/oakd/rgb/image_raw/compressed
+ros2 topic hz /robot2/oakd/stereo/image_raw/compressedDepth
 ros2 topic echo --once /robot2/amcl_pose
 ```
 
@@ -73,7 +73,7 @@ ros2 launch mini_control system.launch.py camera_index:=0 target_distance:=0.8 m
 | 인자 | 기본값 | 설명 |
 |---|---|---|
 | `camera_index` | `2` | 고정 웹캠 번호 (`ls /dev/video*`로 확인) |
-| `amr_camera_topic` | `/robot2/oakd/rgb/preview/image_raw` | AMR 카메라 토픽 |
+| `amr_camera_topic` | `/robot2/oakd/rgb/image_raw/compressed` | AMR 카메라 토픽 (depth는 `stereo/image_raw/compressedDepth`, 둘 다 704x704) |
 | `cmd_vel_topic` | `/robot2/cmd_vel` | 추종 속도 명령 토픽 |
 | `target_distance` | `0.8` | 추종 시 유지할 거리 [m] |
 | `min_distance` | `0.5` | 이 거리 이하면 전진 정지 (회전은 유지) [m] |
@@ -83,7 +83,7 @@ ros2 launch mini_control system.launch.py camera_index:=0 target_distance:=0.8 m
 | `handover_detection_count` | `3` | 추종 전환에 필요한 연속 감지 횟수 |
 
 - `amr_detector`는 감지 창을 띄우므로(`show_window: True`) 디스플레이가 있는 환경에서 실행한다.
-- `mission_manager`의 `image_width`(기본 640)가 AMR preview 영상의 가로 폭과 같아야 회전 계산이 맞다.
+- `mission_manager`의 `image_width`(기본 640)가 AMR 영상의 가로 폭(704)과 같아야 회전 계산이 맞다.
 
 ### 4. 동작 확인
 
