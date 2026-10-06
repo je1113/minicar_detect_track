@@ -2,9 +2,11 @@
 TurtleBot4 AMR 카메라 토픽 → YOLO 감지 + depth 거리 → /amr/detections.
 
 [거리 추가를 위해 수정했다]
-OAK-D depth 영상(/robot2/oakd/stereo/image_raw)을 함께 구독해서
+해상도를 맞춰 둔 압축 토픽 두 개를 구독한다 (둘 다 704x704).
+  RGB   /robot2/oakd/rgb/image_raw/compressed          (JPEG, bgr8)
+  depth /robot2/oakd/stereo/image_raw/compressedDepth  (PNG, 16UC1 mm)
 박스 중심 주변의 depth 값으로 자동차까지 거리를 구한다.
-depth 영상은 RGB preview에 정렬되어 있고 해상도도 같다고 본다.
+depth 영상은 RGB에 정렬되어 있고 해상도도 같다.
 그래서 박스 중심 픽셀 (u, v)를 depth 영상에 그대로 쓴다.
 
 거리는 표준 메시지의 빈 칸에 넣는다. 새 토픽은 만들지 않는다.
@@ -47,7 +49,7 @@ FOLLOWING 상태에서 정지 명령만 보낸다. 아래 두 곳만 고치면 �
   - 거리와 박스가 같은 메시지로 오므로 detection_timeout 검사가
     거리에도 그대로 적용된다.
   - 확인할 것: mission_manager 의 image_width 파라미터(기본 640)가
-    AMR preview 영상의 실제 가로 폭과 같아야 회전 계산이 맞다.
+    AMR 영상의 실제 가로 폭(704)과 같아야 회전 계산이 맞다.
 """
 
 import os
@@ -58,13 +60,16 @@ import numpy as np
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import CompressedImage
 from ultralytics import YOLO
 from vision_msgs.msg import Detection2DArray
 
 from ament_index_python.packages import get_package_share_directory
 
 from mini_vision.common import detect, run_node
+
+# compressedDepth 메시지는 PNG 앞에 12바이트 헤더(압축 방식, 깊이 변환값)가 붙는다.
+COMPRESSED_DEPTH_HEADER_SIZE = 12
 
 
 class AmrDetector(Node):
@@ -84,7 +89,7 @@ class AmrDetector(Node):
 
         # 카메라 토픽/모델/검출 관련 기본 파라미터
         defaults = {
-            'camera_topic': '/robot2/oakd/rgb/preview/image_raw',
+            'camera_topic': '/robot2/oakd/rgb/image_raw/compressed',
             'model_path': default_model_path,
             'detection_topic': '/amr/detections',
             'target_class': 'car',
@@ -92,7 +97,7 @@ class AmrDetector(Node):
             'device': 'cpu',
             'show_window': True,
             # 거리 추가를 위해 수정했다: depth 관련 파라미터
-            'depth_topic': '/robot2/oakd/stereo/image_raw',
+            'depth_topic': '/robot2/oakd/stereo/image_raw/compressedDepth',
             'depth_patch_size': 7,      # 박스 중심 주변 N×N 픽셀
             'depth_min_valid': 5,       # 유효 depth 픽셀이 이보다 적으면 실패
             'depth_max_dt': 0.1,        # RGB와 depth 촬영 시각 허용 차이 (초)
@@ -149,7 +154,7 @@ class AmrDetector(Node):
         # sensor_data QoS(best effort, depth 5)는 카메라 드라이버가
         # reliable / best effort 어느 쪽으로 발행해도 받을 수 있다.
         self.create_subscription(
-            Image,
+            CompressedImage,
             self.p['camera_topic'],
             self.image_callback,
             qos_profile_sensor_data
@@ -162,7 +167,7 @@ class AmrDetector(Node):
         self.depth_stamp = None
 
         self.create_subscription(
-            Image,
+            CompressedImage,
             self.p['depth_topic'],
             self.depth_callback,
             qos_profile_sensor_data
@@ -175,24 +180,31 @@ class AmrDetector(Node):
 
     def depth_callback(self, image):
         # 거리 추가를 위해 수정했다.
-        # depth_checker.py 와 같은 방식으로 passthrough 변환한다.
-        try:
-            depth = self.bridge.imgmsg_to_cv2(
-                image,
-                desired_encoding='passthrough'
-            )
-        except Exception as error:
+        # compressedDepth 는 cv_bridge 로 풀 수 없다.
+        # 12바이트 헤더를 건너뛰고 PNG 를 직접 디코딩한다.
+        if not image.format.startswith('16UC1'):
             self.get_logger().error(
-                f'depth 변환 실패: {error}',
+                f'지원하지 않는 depth 형식입니다: {image.format}',
                 throttle_duration_sec=3.0
             )
             return
 
-        # 16UC1 은 mm, 32FC1 은 m 단위다. 둘 다 m 로 맞춘다.
-        if depth.dtype == np.uint16:
-            self.depth_m = depth.astype(np.float32) / 1000.0
-        else:
-            self.depth_m = depth.astype(np.float32)
+        depth = cv2.imdecode(
+            np.frombuffer(image.data, np.uint8)[
+                COMPRESSED_DEPTH_HEADER_SIZE:
+            ],
+            cv2.IMREAD_UNCHANGED
+        )
+
+        if depth is None or depth.dtype != np.uint16:
+            self.get_logger().error(
+                'depth PNG 디코딩 실패',
+                throttle_duration_sec=3.0
+            )
+            return
+
+        # 16UC1 은 mm 단위다. m 로 맞춘다.
+        self.depth_m = depth.astype(np.float32) / 1000.0
 
         self.depth_stamp = Time.from_msg(image.header.stamp)
 
@@ -255,8 +267,8 @@ class AmrDetector(Node):
         header = image.header
 
         try:
-            # ROS 영상 메시지 → OpenCV BGR 이미지
-            frame = self.bridge.imgmsg_to_cv2(
+            # 압축(JPEG) 영상 메시지 → OpenCV BGR 이미지
+            frame = self.bridge.compressed_imgmsg_to_cv2(
                 image,
                 desired_encoding='bgr8'
             )
