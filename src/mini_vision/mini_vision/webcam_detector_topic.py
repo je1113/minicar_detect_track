@@ -1,4 +1,4 @@
-"""고정 USB 웹캠 → YOLO 감지 → /webcam/detections + /webcam/image_annotated."""
+"""고정 USB 웹캠 → car/dummy 감지 → /webcam/detections + /webcam/image_annotated."""
 
 import os
 
@@ -14,11 +14,15 @@ from ament_index_python.packages import get_package_share_directory
 
 from mini_vision.common import detect, run_node
 
-BOX_COLOR = (0, 200, 0)  # BGR
+BOX_COLOR = (0, 200, 0)  # BGR, CLASS_COLORS에 없는 클래스의 기본 색
+CLASS_COLORS = {
+    'car': (0, 200, 0),       # 초록
+    'dummy': (0, 140, 255),   # 주황
+}
 
 
 def draw_detections(frame, message):
-    """Detection2DArray에 담긴 박스만 원본 복사본에 그린다."""
+    """Detection2DArray에 담긴 박스만 클래스별 색으로 원본 복사본에 그린다."""
 
     image = frame.copy()
 
@@ -33,9 +37,10 @@ def draw_detections(frame, message):
 
         hypothesis = detection.results[0].hypothesis
         text = f'{hypothesis.class_id} {hypothesis.score:.2f}'
+        color = CLASS_COLORS.get(hypothesis.class_id, BOX_COLOR)
 
-        cv2.rectangle(image, (x1, y1), (x2, y2), BOX_COLOR, 2)
-        cv2.circle(image, (int(cx), int(cy)), 4, BOX_COLOR, -1)
+        cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
+        cv2.circle(image, (int(cx), int(cy)), 4, color, -1)
 
         # 박스 위에 글자 배경을 깔고 텍스트 표시 (화면 위로 넘어가면 박스 안쪽)
         (tw, th), base = cv2.getTextSize(
@@ -46,7 +51,7 @@ def draw_detections(frame, message):
             image,
             (x1, ty - th - base),
             (x1 + tw + 4, ty + base),
-            BOX_COLOR,
+            color,
             -1
         )
         cv2.putText(
@@ -76,7 +81,7 @@ class WebcamDetector(Node):
         defaults = {
             'camera_index': 4,
             'model_path': default_model_path,
-            'target_class': 'car',
+            'target_classes': ['car', 'dummy'],
             'confidence': 0.8,          # 기존 0.5 -> 0.8 추천
             'device': 'cpu',
             'image_width': 640,
@@ -84,8 +89,6 @@ class WebcamDetector(Node):
             'rate_hz': 10.0,
             'show_window': True,
             'frame_id': 'webcam_optical_frame',
-            'max_detections': 1,        # 자동차는 1개만 사용
-            'min_box_area': 1500,       # 너무 작은 박스는 무시
             'annotated_topic': '/webcam/image_annotated',
         }
 
@@ -122,13 +125,17 @@ class WebcamDetector(Node):
             f"YOLO classes: {self.model.names}"
         )
 
-        # target_class 확인
-        if self.p['target_class'] not in self.model.names.values():
-            raise ValueError(
-                f"모델에 클래스가 없습니다: "
-                f"{self.p['target_class']}, "
-                f"available={self.model.names}"
-            )
+        # target_classes 확인
+        if not self.p['target_classes']:
+            raise ValueError('target_classes에 클래스 이름을 지정하세요.')
+
+        for name in self.p['target_classes']:
+            if name not in self.model.names.values():
+                raise ValueError(
+                    f"모델에 클래스가 없습니다: "
+                    f"{name}, "
+                    f"available={self.model.names}"
+                )
 
         # USB 웹캠 열기
         self.camera = cv2.VideoCapture(
@@ -232,7 +239,7 @@ class WebcamDetector(Node):
                 self.model,
                 frame,
                 header,
-                self.p['target_class'],
+                self.p['target_classes'],
                 self.p['confidence'],
                 self.p['device']
             )
