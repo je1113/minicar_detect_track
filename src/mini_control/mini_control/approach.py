@@ -124,11 +124,6 @@ def compute_view_pose(
         yaw
     )
 
-def should_retarget(previous_car: Point2D, new_car: Point2D, threshold: float) -> bool:
-    """자동차가 threshold 이상 움직였을 때만 진행 중인 goal 을 교체한다."""
-    moved = math.hypot(new_car.x - previous_car.x, new_car.y - previous_car.y)
-    return moved >= threshold
-
 
 # ------------------------------------------------------------------- parameters
 @dataclass(frozen=True)
@@ -151,8 +146,6 @@ class ApproachParams:
     # 자동차 기준, OAK-D가 잘 보이는 AMR 위치
     view_offset_x: float = 0.6755
     view_offset_y: float = 0.8150
-
-    retarget_threshold: float = 0.3
 
     @classmethod
     def declare_and_load(cls, node: Node) -> 'ApproachParams':
@@ -223,10 +216,10 @@ class ApproachNode(Node):
     def _on_target(self, msg: PointStamped) -> None:
         if not self._validate_target(msg):
             return
-        car = Point2D(msg.point.x, msg.point.y)
-        if not self._should_send_goal(car):
+        if self._status is ApproachStatus.MOVING:
+            self.get_logger().info('already moving, target ignored')
             return
-        self._send_goal(car)
+        self._send_goal(Point2D(msg.point.x, msg.point.y))
 
     def _on_goal_response(self, future: Future, request: _GoalRequest) -> None:
         handle: ClientGoalHandle = future.result()
@@ -262,12 +255,6 @@ class ApproachNode(Node):
             return False
 
         return True
-
-    def _should_send_goal(self, car: Point2D) -> bool:
-        # 웹캠은 좌표를 계속 보내므로, 이동 중에는 자동차가 충분히 움직였을 때만 goal 을 교체한다.
-        if self._status is not ApproachStatus.MOVING or self._active_goal is None:
-            return True
-        return should_retarget(self._active_goal.car, car, self._params.retarget_threshold)
 
     def _send_goal(self, car: Point2D) -> None:
         if not self._nav.server_is_ready():

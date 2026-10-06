@@ -81,7 +81,3 @@ approach:
     #
     view_offset_x: 0.6755
     view_offset_y: 0.8150
-
-    # 이동 중 자동차 위치가 이 거리 이상 바뀌었을 때만
-    # 새로운 Nav2 goal로 교체
-    retarget_threshold: 0.3
