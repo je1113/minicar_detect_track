@@ -3,3 +3,7 @@
 /log
 
 .vscode/
+/CLAUDE.md
+
+__pycache__/
+*.pyc

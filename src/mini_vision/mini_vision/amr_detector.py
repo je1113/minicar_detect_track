@@ -25,56 +25,6 @@ dummy 는 중심 좌표도 거리도 필요 없어서 토픽에 싣지 않는다
   publish_classes 에 'dummy' 를 넣으면 dummy 도 토픽에 실리지만 거리는 0.0 이다.
   그때는 dummy 만 보이면 detections[0] 이 dummy 가 되므로 받는 쪽이 class_id 로
   car 를 골라야 한다.
-
-----------------------------------------------------------------------
-mission_manager 수정 방법 (mini_control/mission_manager.py)
-----------------------------------------------------------------------
-[car 고르기 - 기본값에서는 필요 없다]
-기본값(publish_classes=['car'])에서는 토픽에 car 만 실려서 지금 코드 그대로 된다.
-publish_classes 에 'dummy' 를 넣을 때만 amr_detection_callback() 이
-msg.detections[0] 을 그대로 쓰지 않고 class_id 가 'car' 인 것만 골라야 한다.
-(안 하면 car 가 안 보이고 dummy 만 보일 때 dummy 를 car 로 착각한다.)
-
-       cars = [
-           d for d in msg.detections
-           if d.results and d.results[0].hypothesis.class_id == 'car'
-       ]
-       if len(cars) == 0:
-           ...
-       detection = cars[0]
-
-[거리 연결 - 아직 안 했다]
-지금 mission_manager는 self.distance 가 항상 None 이라서
-FOLLOWING 상태에서 정지 명령만 보낸다. 아래 두 곳만 고치면 된다.
-구독 토픽(/amr/detections)과 launch 는 바꿀 필요가 없다.
-
-1) amr_detection_callback() 의 "자동차 감지 실패" 분기에 추가
-
-       if len(msg.detections) == 0:
-           self.target_detected = False
-           self.handover_count = 0
-           self.distance = None          # 추가
-
-2) amr_detection_callback() 에서 target_center_x 를 저장한 바로 아래에 추가
-
-       self.target_center_x = float(
-           detection.bbox.center.position.x
-       )
-
-       # 추가: amr_detector 가 넣어 준 거리 [m], 0 이하는 측정 실패
-       distance = 0.0
-       if detection.results:
-           distance = float(
-               detection.results[0].pose.pose.position.z
-           )
-       self.distance = distance if distance > 0.0 else None
-
-그 외에는 지금 코드가 그대로 동작한다.
-  - 거리가 None 이면 control_loop 의 FOLLOWING 에서 정지한다 (기존 코드).
-  - 거리와 박스가 같은 메시지로 오므로 detection_timeout 검사가
-    거리에도 그대로 적용된다.
-  - 확인할 것: mission_manager 의 image_width 파라미터(기본 640)가
-    AMR 영상의 실제 가로 폭(704)과 같아야 회전 계산이 맞다.
 """
 
 import os

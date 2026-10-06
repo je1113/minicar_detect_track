@@ -6,6 +6,11 @@ mission_manager:
     # AMR 카메라의 자동차 감지 결과
     amr_detection_topic: "/amr/detections"
 
+    # approach 노드와 맞춘 팀 인터페이스 토픽
+    approach_target_topic: "/approach/target_point"
+    approach_cancel_topic: "/approach/cancel"
+    approach_status_topic: "/approach/status"
+
     # 이동 목표를 표현할 좌표계
     map_frame: "map"
 
