@@ -1,67 +1,87 @@
 mission_manager:
   ros__parameters:
-    # 웹캠이 계산한 자동차 지도 위치
+
+    # =====================================================
+    # Topic
+    # =====================================================
+
+    # 고정 웹캠에서 계산한 자동차 map 위치
     target_position_topic: "/target/map_position"
 
-    # AMR 카메라의 자동차 감지 결과
+    # AMR OAK-D 자동차 감지
     amr_detection_topic: "/amr/detections"
 
-    # approach 노드와 맞춘 팀 인터페이스 토픽
+    # approach 노드 인터페이스
     approach_target_topic: "/approach/target_point"
     approach_cancel_topic: "/approach/cancel"
     approach_status_topic: "/approach/status"
 
-    # 이동 목표를 표현할 좌표계
+    # TurtleBot4 속도 명령
+    cmd_vel_topic: "/robot2/cmd_vel"
+
+    # 좌표계
     map_frame: "map"
 
-    # 아래 연결 정보는 실제 로봇에서 확인한 뒤 추가한다.
-    #
-    # Nav2 이동 액션 이름
-    # navigate_action: "/실제_namespace/navigate_to_pose"
-    #
-    # 로봇에 속도를 보내는 토픽
-    # cmd_vel_topic: "/실제_namespace/cmd_vel"
-    #
-    # 실제 토픽 타입을 확인해 Twist 또는 TwistStamped로 설정한다.
-    # cmd_vel_type: "TwistStamped"
+    # =====================================================
+    # Following
+    # =====================================================
 
-    # 아래 제어값은 테스트 후 결정한다.
-    # 숫자는 예시로 임의 지정하지 않고 항목만 남겨둔다.
-    #
-    # 자동차 근처에 접근할 때 유지할 거리 (미터)
-    # approach_distance: ...
-    #
-    # 추종 중 유지할 목표 거리 (미터)
-    # follow_distance: ...
-    #
-    # 최대 전진 속도 (미터/초)
-    # max_linear_speed: ...
-    #
-    # 최대 회전 속도 (라디안/초)
-    # max_angular_speed: ...
-    #
-    # 감지 결과를 유효하다고 보는 최대 시간 (초)
-    # detection_timeout: ...
-    #
-    # 추종으로 전환하기 전에 필요한 연속 감지 횟수
-    # handover_detection_count: ...
+    # AMR 카메라 영상 가로 크기
+    image_width: 640
 
-    # 코드에서는 필수 설정이 없으면 이동을 시작하지 않도록 한다.
+    # 추종할 때 자동차와 유지할 목표 거리 [m]
+    target_distance: 0.8
+
+    # 이 거리보다 가까우면 전진하지 않음 [m]
+    min_distance: 0.5
+
+    # 거리 오차 → 직진 속도 gain
+    linear_gain: 0.5
+
+    # 이미지 중심 오차 → 회전 속도 gain
+    angular_gain: 1.0
+
+    # 최대 속도
+    max_linear_speed: 0.31
+    max_angular_speed: 1.0
+
+    # 마지막 자동차 감지를 유효하게 보는 시간 [s]
+    detection_timeout: 0.5
+
+    # HANDOVER → FOLLOWING 전환에 필요한 연속 감지 횟수
+    handover_detection_count: 3
+
 
 approach:
   ros__parameters:
-    # 코드 기본값은 namespace 없는 중립 값이고, 여기서 /robot2 기준으로 덮어쓴다.
+
+    # =====================================================
+    # Nav2
+    # =====================================================
+
     nav_action: "/robot2/navigate_to_pose"
     pose_topic: "/robot2/amcl_pose"
 
-    # mission_manager / localizer 와 맞춘 팀 인터페이스 토픽
+    # mission_manager 인터페이스
     target_topic: "/approach/target_point"
     cancel_topic: "/approach/cancel"
     status_topic: "/approach/status"
 
     map_frame: "map"
 
-    # 자동차 앞에서 멈출 거리 (미터)
-    approach_distance: 0.5
-    # 이동 중 자동차가 이만큼 이상 움직여야 goal 을 교체 (미터)
+    # =====================================================
+    # 자동차를 보기 좋은 AMR 위치
+    # =====================================================
+
+    # car 위치 기준 AMR goal offset [m]
+    #
+    # 테스트:
+    # car ≈ (-0.0355, 1.025)
+    # AMR  ≈ (0.64, 1.84)
+    #
+    view_offset_x: 0.6755
+    view_offset_y: 0.8150
+
+    # 이동 중 자동차 위치가 이 거리 이상 바뀌었을 때만
+    # 새로운 Nav2 goal로 교체
     retarget_threshold: 0.3
