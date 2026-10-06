@@ -14,20 +14,16 @@ amr_detector.py 와 같은 방식으로 depth 영상을 구독해서 car 박스 
 RGB/depth 는 해상도를 맞춰 둔 압축 토픽(둘 다 704x704)을 쓴다.
   RGB   /robot2/oakd/rgb/image_raw/compressed          (JPEG, bgr8)
   depth /robot2/oakd/stereo/image_raw/compressedDepth  (PNG, 16UC1 mm)
-
-[RGB 와 depth 시각이 어긋나 거리가 N/A 로 깜빡이던 문제를 고치기 위해 수정했다]
-amr_detector.py 와 같다. depth 는 mini_vision.depth_distance 의 별도 노드가
-따로 받아 두고, RGB 촬영 시각에 가장 가까운 depth 로 거리를 잰다.
-RGB 구독 큐 깊이는 1 로 줄여서 YOLO 가 느려도 가장 최근 영상만 처리한다.
-거리를 못 재도 감지 결과와 /amr/image_annotated 는 그대로 나간다.
 """
 
 import os
 
 import cv2
 from cv_bridge import CvBridge
+import numpy as np
 from rclpy.node import Node
-from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.qos import qos_profile_sensor_data
+from rclpy.time import Time
 from sensor_msgs.msg import CompressedImage, Image
 from ultralytics import YOLO
 from vision_msgs.msg import Detection2DArray
@@ -36,8 +32,10 @@ from ament_index_python.packages import get_package_share_directory
 
 from mini_vision.amr_detector import draw_distances
 from mini_vision.common import detect, run_node
-from mini_vision.depth_distance import DEPTH_DEFAULTS, DepthDistance
 from mini_vision.webcam_detector_topic import draw_detections
+
+# compressedDepth 메시지는 PNG 앞에 12바이트 헤더(압축 방식, 깊이 변환값)가 붙는다.
+COMPRESSED_DEPTH_HEADER_SIZE = 12
 
 
 class AmrDetector(Node):
@@ -66,10 +64,11 @@ class AmrDetector(Node):
             'device': 'cpu',
             'show_window': True,
             'annotated_topic': '/amr/image_annotated',
-            # RGB 구독 큐 깊이. 1 이면 YOLO 가 밀려도 가장 최근 영상만 처리한다.
-            'image_queue_depth': 1,
-            # 거리 추가를 위해 수정했다: depth 관련 파라미터 (depth_distance.py)
-            **DEPTH_DEFAULTS,
+            # 거리 추가를 위해 수정했다: depth 관련 파라미터
+            'depth_topic': '/robot2/oakd/stereo/image_raw/compressedDepth',
+            'depth_patch_size': 7,      # 박스 중심 주변 N×N 픽셀
+            'depth_min_valid': 5,       # 유효 depth 픽셀이 이보다 적으면 실패
+            'depth_max_dt': 0.1,        # RGB와 depth 촬영 시각 허용 차이 (초)
         }
 
         for name, value in defaults.items():
@@ -138,30 +137,116 @@ class AmrDetector(Node):
         )
 
         # AMR 카메라 영상 구독
-        # sensor_data 와 같은 best effort QoS 는 카메라 드라이버가
+        # sensor_data QoS(best effort, depth 5)는 카메라 드라이버가
         # reliable / best effort 어느 쪽으로 발행해도 받을 수 있다.
-        # 큐 깊이는 1 로 줄여서 YOLO 가 느려도 오래된 영상부터 처리하지 않는다.
-        image_qos = QoSProfile(
-            history=HistoryPolicy.KEEP_LAST,
-            depth=max(int(self.p['image_queue_depth']), 1),
-            reliability=ReliabilityPolicy.BEST_EFFORT
-        )
-
         self.create_subscription(
             CompressedImage,
             self.p['camera_topic'],
             self.image_callback,
-            image_qos
+            qos_profile_sensor_data
         )
 
-        # 거리 추가를 위해 수정했다: depth 영상은 별도 노드가 따로 받는다.
-        # image_callback 에서는 RGB 촬영 시각에 가장 가까운 depth 로 거리를 잰다.
-        self.depth_distance = DepthDistance(self.p, self.get_logger())
+        # 거리 추가를 위해 수정했다: depth 영상 구독
+        # 최신 depth 영상(단위 m)과 촬영 시각만 저장해 두고
+        # image_callback 에서 박스 중심 거리를 읽는다.
+        self.depth_m = None
+        self.depth_stamp = None
+
+        self.create_subscription(
+            CompressedImage,
+            self.p['depth_topic'],
+            self.depth_callback,
+            qos_profile_sensor_data
+        )
 
         self.get_logger().info(
             f"camera topic: {self.p['camera_topic']}, "
             f"depth topic: {self.p['depth_topic']}"
         )
+
+    def depth_callback(self, image):
+        # 거리 추가를 위해 수정했다.
+        # compressedDepth 는 cv_bridge 로 풀 수 없다.
+        # 12바이트 헤더를 건너뛰고 PNG 를 직접 디코딩한다.
+        if not image.format.startswith('16UC1'):
+            self.get_logger().error(
+                f'지원하지 않는 depth 형식입니다: {image.format}',
+                throttle_duration_sec=3.0
+            )
+            return
+
+        depth = cv2.imdecode(
+            np.frombuffer(image.data, np.uint8)[
+                COMPRESSED_DEPTH_HEADER_SIZE:
+            ],
+            cv2.IMREAD_UNCHANGED
+        )
+
+        if depth is None or depth.dtype != np.uint16:
+            self.get_logger().error(
+                'depth PNG 디코딩 실패',
+                throttle_duration_sec=3.0
+            )
+            return
+
+        # 16UC1 은 mm 단위다. m 로 맞춘다.
+        self.depth_m = depth.astype(np.float32) / 1000.0
+
+        self.depth_stamp = Time.from_msg(image.header.stamp)
+
+    def measure_distance(self, u, v, frame_shape, image_stamp):
+        """
+        거리 추가를 위해 수정했다.
+
+        박스 중심 (u, v) 주변 N×N depth 값 중 0/NaN 을 뺀 중앙값 [m].
+        측정할 수 없으면 0.0 을 반환한다.
+        """
+        if self.depth_m is None:
+            self.get_logger().warning(
+                'depth 영상을 아직 받지 못했습니다.',
+                throttle_duration_sec=3.0
+            )
+            return 0.0
+
+        # RGB와 depth 가 정렬·같은 해상도라는 전제를 확인한다.
+        if self.depth_m.shape[:2] != frame_shape[:2]:
+            self.get_logger().warning(
+                f'RGB {frame_shape[:2]} 와 depth {self.depth_m.shape[:2]} '
+                f'해상도가 다릅니다. 거리를 측정하지 않습니다.',
+                throttle_duration_sec=3.0
+            )
+            return 0.0
+
+        # 너무 오래된 depth 로 재지 않도록 촬영 시각 차이를 확인한다.
+        dt = abs(
+            (Time.from_msg(image_stamp) - self.depth_stamp).nanoseconds
+        ) / 1e9
+        if dt > self.p['depth_max_dt']:
+            self.get_logger().warning(
+                f'RGB와 depth 시각 차이 {dt:.3f}s > '
+                f"{self.p['depth_max_dt']}s",
+                throttle_duration_sec=3.0
+            )
+            return 0.0
+
+        height, width = self.depth_m.shape[:2]
+        half = max(int(self.p['depth_patch_size']) // 2, 0)
+
+        u = min(max(int(round(u)), 0), width - 1)
+        v = min(max(int(round(v)), 0), height - 1)
+
+        patch = self.depth_m[
+            max(v - half, 0):v + half + 1,
+            max(u - half, 0):u + half + 1
+        ]
+
+        # depth 0 은 측정 실패(구멍)이므로 뺀다.
+        valid = patch[np.isfinite(patch) & (patch > 0.0)]
+
+        if valid.size < self.p['depth_min_valid']:
+            return 0.0
+
+        return float(np.median(valid))
 
     def image_callback(self, image):
         # 감지 결과는 카메라 영상의 촬영 시각과 frame_id를 그대로 쓴다.
@@ -204,7 +289,7 @@ class AmrDetector(Node):
                     distances.append(None)
                     continue
 
-                distance = self.depth_distance.measure(
+                distance = self.measure_distance(
                     detection.bbox.center.position.x,
                     detection.bbox.center.position.y,
                     frame.shape,
@@ -257,8 +342,6 @@ class AmrDetector(Node):
         self.annotated_publisher.publish(message)
 
     def destroy_node(self):
-        self.depth_distance.close()
-
         if self.p['show_window']:
             cv2.destroyAllWindows()
 

@@ -1,6 +1,6 @@
-"""depth_distance 테스트: 패치 중앙값, 유지·중앙값 필터, 늦게 오는 depth 처리."""
+"""amr_detector 의 depth 거리 계산 테스트: 패치 중앙값, 필터, 늦게 오는 depth 처리."""
 
-from mini_vision.depth_distance import (
+from mini_vision.amr_detector import (
     DEPTH_DEFAULTS,
     DepthDistance,
     DistanceFilter,
