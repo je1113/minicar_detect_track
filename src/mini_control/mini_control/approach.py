@@ -94,23 +94,35 @@ def quaternion_to_yaw(q: QuaternionXYZW) -> float:
     return math.atan2(2.0 * (q.w * q.z + q.x * q.y),
                       1.0 - 2.0 * (q.y * q.y + q.z * q.z))
 
-
-def compute_approach_pose(robot: Point2D, car: Point2D, approach_distance: float) -> Pose2D:
+def compute_view_pose(
+    car: Point2D,
+    offset_x: float,
+    offset_y: float
+) -> Pose2D:
     """
-    로봇 쪽으로 자동차에서 approach_distance 떨어진 지점과 자동차를 바라보는 yaw 를 구한다.
+    자동차 위치를 기준으로 OAK-D에서 잘 보이는 위치를 계산한다.
 
-    이미 approach_distance 이내라면 로봇 위치를 유지하고 방향만 자동차로 맞춘다.
+    goal 위치:
+        goal_x = car_x + offset_x
+        goal_y = car_y + offset_y
+
+    yaw:
+        goal 위치에서 자동차를 바라보도록 계산
     """
-    dx, dy = car.x - robot.x, car.y - robot.y
-    distance = math.hypot(dx, dy)
-    yaw_to_car = math.atan2(dy, dx)
 
-    if distance <= approach_distance:
-        return Pose2D(robot.x, robot.y, yaw_to_car)
-    return Pose2D(car.x - approach_distance * dx / distance,
-                  car.y - approach_distance * dy / distance,
-                  yaw_to_car)
+    goal_x = car.x + offset_x
+    goal_y = car.y + offset_y
 
+    yaw = math.atan2(
+        car.y - goal_y,
+        car.x - goal_x
+    )
+
+    return Pose2D(
+        goal_x,
+        goal_y,
+        yaw
+    )
 
 def should_retarget(previous_car: Point2D, new_car: Point2D, threshold: float) -> bool:
     """자동차가 threshold 이상 움직였을 때만 진행 중인 goal 을 교체한다."""
@@ -135,7 +147,11 @@ class ApproachParams:
     cancel_topic: str = '/approach/cancel'
     status_topic: str = '/approach/status'
     map_frame: str = 'map'
-    approach_distance: float = 0.5
+
+    # 자동차 기준, OAK-D가 잘 보이는 AMR 위치
+    view_offset_x: float = 0.6755
+    view_offset_y: float = 0.8150
+
     retarget_threshold: float = 0.3
 
     @classmethod
@@ -238,16 +254,13 @@ class ApproachNode(Node):
 
     # ------------------------------------------------------- target -> goal
     def _validate_target(self, msg: PointStamped) -> bool:
-        """Target 을 처리할 수 있는지 검사하고, 로봇 위치를 모르면 FAILED 를 알린다."""
         if msg.header.frame_id != self._params.map_frame:
-            self.get_logger().warn(
+            self.get_logger().warning(
                 f"target frame is '{msg.header.frame_id}', "
-                f"expected '{self._params.map_frame}'. ignored")
+                f"expected '{self._params.map_frame}'. ignored"
+            )
             return False
-        if self._robot_pose is None:
-            self.get_logger().warn('robot pose unknown (AMCL pose not received yet)')
-            self._set_status(ApproachStatus.FAILED)
-            return False
+
         return True
 
     def _should_send_goal(self, car: Point2D) -> bool:
@@ -262,8 +275,7 @@ class ApproachNode(Node):
             self._set_status(ApproachStatus.FAILED)
             return
 
-        goal_pose = compute_approach_pose(
-            self._robot_pose.position, car, self._params.approach_distance)
+        goal_pose = compute_view_pose(car, self._params.view_offset_x, self._params.view_offset_y)
         goal_msg = NavigateToPose.Goal(pose=self._to_pose_stamped(goal_pose))
 
         # 새 goal 을 보내면 Nav2 가 이전 goal 을 선점(preempt)하므로 이전 goal 을 따로 취소하지 않는다.
@@ -271,7 +283,11 @@ class ApproachNode(Node):
         self._active_goal = request
 
         self.get_logger().info(
-            f'target=({car.x:.2f}, {car.y:.2f}) -> goal=({goal_pose.x:.2f}, {goal_pose.y:.2f})')
+            f'car=({car.x:.3f}, {car.y:.3f}) '
+            f'-> goal=({goal_pose.x:.3f}, {goal_pose.y:.3f}) '
+            f'yaw={goal_pose.yaw:.3f}'
+        )
+
         self._set_status(ApproachStatus.MOVING)
 
         future = self._nav.send_goal_async(goal_msg)
