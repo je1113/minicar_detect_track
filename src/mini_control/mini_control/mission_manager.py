@@ -1,9 +1,12 @@
 """
-역할:
-웹캠 발견 → AMR 접근 → AMR 카메라 인계 → 추종 순서를 관리한다.
+웹캠 발견 → Nav2 접근 → AMR 카메라 인계 → 자동차 추종을 관리한다.
 
-현재는 webcam_localizer.py, amr_detector.py의
-실제 구현이 완료되기 전이므로 ROS2 연결 틀을 구성한다.
+상태:
+SEARCHING
+APPROACHING
+HANDOVER
+FOLLOWING
+LOST
 
 approach 연결:
   웹캠 좌표를 approach 목표 토픽으로 넘기고,
@@ -34,7 +37,7 @@ class MissionManager(Node):
         super().__init__('mission_manager')
 
         # =====================================================
-        # 1. ROS2 파라미터
+        # 1. ROS2 파라미터 선언
         # =====================================================
         self.declare_parameter(
             'target_position_topic',
@@ -44,11 +47,6 @@ class MissionManager(Node):
         self.declare_parameter(
             'amr_detection_topic',
             '/amr/detections'
-        )
-
-        self.declare_parameter(
-            'cmd_vel_topic',
-            '/robot2/cmd_vel'
         )
 
         self.declare_parameter(
@@ -67,8 +65,18 @@ class MissionManager(Node):
         )
 
         self.declare_parameter(
+            'cmd_vel_topic',
+            '/robot2/cmd_vel'
+        )
+
+        self.declare_parameter(
             'map_frame',
             'map'
+        )
+
+        self.declare_parameter(
+            'image_width',
+            640
         )
 
         self.declare_parameter(
@@ -102,17 +110,17 @@ class MissionManager(Node):
         )
 
         self.declare_parameter(
-            'image_width',
-            640
-        )
-
-        self.declare_parameter(
             'detection_timeout',
             0.5
         )
 
+        self.declare_parameter(
+            'handover_detection_count',
+            3
+        )
+
         # =====================================================
-        # 2. 파라미터 값 읽기
+        # 2. 파라미터 읽기
         # =====================================================
         self.target_position_topic = (
             self.get_parameter(
@@ -123,12 +131,6 @@ class MissionManager(Node):
         self.amr_detection_topic = (
             self.get_parameter(
                 'amr_detection_topic'
-            ).value
-        )
-
-        self.cmd_vel_topic = (
-            self.get_parameter(
-                'cmd_vel_topic'
             ).value
         )
 
@@ -150,9 +152,21 @@ class MissionManager(Node):
             ).value
         )
 
+        self.cmd_vel_topic = (
+            self.get_parameter(
+                'cmd_vel_topic'
+            ).value
+        )
+
         self.map_frame = (
             self.get_parameter(
                 'map_frame'
+            ).value
+        )
+
+        self.image_width = int(
+            self.get_parameter(
+                'image_width'
             ).value
         )
 
@@ -192,41 +206,35 @@ class MissionManager(Node):
             ).value
         )
 
-        self.image_width = int(
-            self.get_parameter(
-                'image_width'
-            ).value
-        )
-
         self.detection_timeout = float(
             self.get_parameter(
                 'detection_timeout'
             ).value
         )
 
+        self.handover_detection_count = int(
+            self.get_parameter(
+                'handover_detection_count'
+            ).value
+        )
+
         # =====================================================
-        # 3. 상태
+        # 3. 상태값
         # =====================================================
         self.state = 'SEARCHING'
 
-        # =====================================================
-        # 4. 웹캠이 계산한 자동차 지도 위치
-        # =====================================================
-        self.target_map_position = None
-
-        # =====================================================
-        # 5. AMR 카메라 추종 데이터
-        # =====================================================
         self.target_detected = False
         self.target_center_x = None
 
-        # 거리값은 amr_detector 실제 구현 후 연결
+        # amr_detector의 실제 거리 출력이 추가되면 연결한다.
         self.distance = None
 
         self.last_detection_time = None
 
+        self.handover_count = 0
+
         # =====================================================
-        # 6. approach 상태
+        # 4. approach 상태
         # =====================================================
         self.approach_status = None
 
@@ -234,33 +242,7 @@ class MissionManager(Node):
         self.handover_cancel_requested = False
 
         # =====================================================
-        # 7. Subscriber
-        # =====================================================
-        self.target_position_sub = self.create_subscription(
-            PointStamped,
-            self.target_position_topic,
-            self.target_position_callback,
-            10
-        )
-
-        self.amr_detection_sub = self.create_subscription(
-            Detection2DArray,
-            self.amr_detection_topic,
-            self.amr_detection_callback,
-            10
-        )
-
-        # approach는 상태를 transient local로 발행하지만,
-        # 이전 실행의 오래된 상태를 받지 않도록 volatile로 구독한다.
-        self.approach_status_sub = self.create_subscription(
-            String,
-            self.approach_status_topic,
-            self.approach_status_callback,
-            10
-        )
-
-        # =====================================================
-        # 8. approach Publisher
+        # 5. approach Publisher
         # =====================================================
         self.approach_target_pub = self.create_publisher(
             PointStamped,
@@ -275,7 +257,7 @@ class MissionManager(Node):
         )
 
         # =====================================================
-        # 9. TurtleBot4 cmd_vel Publisher
+        # 6. TurtleBot4 속도 Publisher
         # =====================================================
         self.cmd_vel_pub = self.create_publisher(
             TwistStamped,
@@ -284,7 +266,36 @@ class MissionManager(Node):
         )
 
         # =====================================================
-        # 10. 제어 Loop
+        # 7. Subscriber
+        # =====================================================
+
+        # 웹캠으로 계산된 자동차 map 위치
+        self.create_subscription(
+            PointStamped,
+            self.target_position_topic,
+            self.target_position_callback,
+            10
+        )
+
+        # approach는 상태를 transient local로 발행하지만,
+        # 이전 실행의 오래된 상태를 받지 않도록 volatile로 구독한다.
+        self.create_subscription(
+            String,
+            self.approach_status_topic,
+            self.approach_status_callback,
+            10
+        )
+
+        # AMR 카메라 자동차 감지
+        self.create_subscription(
+            Detection2DArray,
+            self.amr_detection_topic,
+            self.amr_detection_callback,
+            10
+        )
+
+        # =====================================================
+        # 8. 제어 Timer
         # =====================================================
         self.timer = self.create_timer(
             0.1,
@@ -296,18 +307,28 @@ class MissionManager(Node):
         )
 
     # =========================================================
-    # 웹캠 지도 위치 수신
+    # 웹캠 자동차 map 위치 수신
     # =========================================================
     def target_position_callback(self, msg):
 
-        self.target_map_position = msg
+        if msg.header.frame_id != self.map_frame:
+            self.get_logger().warning(
+                f'잘못된 frame: {msg.header.frame_id}'
+            )
+            return
 
+        # SEARCHING 상태일 때 자동차 위치를 찾으면 접근 시작
         if self.state == 'SEARCHING':
+
+            self.approach_target_pub.publish(msg)
+
             self.state = 'APPROACHING'
 
             self.get_logger().info(
                 'SEARCHING -> APPROACHING'
             )
+
+            return
 
         # 취소를 요청한 뒤 새 목표를 보내면 Nav2가 다시 움직이므로 보내지 않는다.
         if (
@@ -369,33 +390,7 @@ class MissionManager(Node):
         )
 
     # =========================================================
-    # AMR 카메라 감지 결과 수신
-    # =========================================================
-    def amr_detection_callback(self, msg):
-
-        # 감지 결과 없음
-        if len(msg.detections) == 0:
-            self.target_detected = False
-            return
-
-        detection = msg.detections[0]
-
-        self.target_detected = True
-
-        self.target_center_x = (
-            detection.bbox.center.position.x
-        )
-
-        self.last_detection_time = (
-            self.get_clock().now()
-        )
-
-        # TODO:
-        # amr_detector.py에서 실제 거리값이 제공되면
-        # self.distance에 연결한다.
-
-    # =========================================================
-    # 접근 완료 알림용 함수
+    # 접근 완료 → AMR 카메라 인계
     # =========================================================
     def notify_approach_complete(self):
 
@@ -403,6 +398,7 @@ class MissionManager(Node):
             return
 
         self.state = 'HANDOVER'
+        self.handover_count = 0
 
         self.stop_robot()
 
@@ -411,21 +407,54 @@ class MissionManager(Node):
         )
 
     # =========================================================
-    # 인계 완료 알림용 함수
+    # AMR 카메라 감지 결과
     # =========================================================
-    def notify_handover_complete(self):
+    def amr_detection_callback(self, msg):
 
-        if self.state != 'HANDOVER':
+        # 자동차 감지 실패
+        if len(msg.detections) == 0:
+
+            self.target_detected = False
+            self.handover_count = 0
+
             return
 
-        self.state = 'FOLLOWING'
+        detection = msg.detections[0]
 
-        self.get_logger().info(
-            'HANDOVER -> FOLLOWING'
+        self.target_detected = True
+
+        self.target_center_x = float(
+            detection.bbox.center.position.x
         )
 
+        self.last_detection_time = (
+            self.get_clock().now()
+        )
+
+        # HANDOVER 상태에서 연속 감지 확인
+        if self.state == 'HANDOVER':
+
+            self.handover_count += 1
+
+            if (
+                self.handover_count
+                >= self.handover_detection_count
+            ):
+                # Nav2 접근 제어 취소 요청
+                self.approach_cancel_pub.publish(
+                    Empty()
+                )
+
+                self.stop_robot()
+
+                self.state = 'FOLLOWING'
+
+                self.get_logger().info(
+                    'HANDOVER -> FOLLOWING'
+                )
+
     # =========================================================
-    # 감지 데이터 시간 확인
+    # 감지 결과가 아직 유효한지 확인
     # =========================================================
     def detection_is_fresh(self):
 
@@ -440,7 +469,7 @@ class MissionManager(Node):
         return elapsed <= self.detection_timeout
 
     # =========================================================
-    # 전체 상태 제어
+    # 상태 제어
     # =========================================================
     def control_loop(self):
 
@@ -452,7 +481,9 @@ class MissionManager(Node):
 
         # -----------------------------------------------------
         # APPROACHING
-        # Nav2가 제어
+        #
+        # 이 상태에서는 Nav2 / approach.py가 제어한다.
+        # cmd_vel을 여기서 보내지 않는다.
         # -----------------------------------------------------
         if self.state == 'APPROACHING':
 
@@ -469,10 +500,11 @@ class MissionManager(Node):
 
         # -----------------------------------------------------
         # HANDOVER
-        # Nav2 제어 해제 후 추종으로 전환 준비
         # -----------------------------------------------------
         if self.state == 'HANDOVER':
+
             self.stop_robot()
+
             return
 
         # -----------------------------------------------------
@@ -480,22 +512,26 @@ class MissionManager(Node):
         # -----------------------------------------------------
         if self.state == 'FOLLOWING':
 
-            # 자동차를 놓쳤거나 오래된 감지 데이터
+            # 자동차 감지 손실
             if (
                 not self.target_detected
                 or not self.detection_is_fresh()
             ):
                 self.state = 'LOST'
+
                 self.stop_robot()
 
                 self.get_logger().warning(
                     'FOLLOWING -> LOST'
                 )
+
                 return
 
-            # 아직 거리 정보가 없으면 이동하지 않음
+            # 아직 실제 거리값이 연결되지 않았으면 정지
             if self.distance is None:
+
                 self.stop_robot()
+
                 return
 
             linear_x, angular_z = compute_velocity(
@@ -525,7 +561,7 @@ class MissionManager(Node):
 
             self.stop_robot()
 
-            # 다시 자동차를 찾으면 추종 재개
+            # 다시 AMR 카메라에서 자동차를 찾음
             if (
                 self.target_detected
                 and self.detection_is_fresh()
@@ -539,7 +575,7 @@ class MissionManager(Node):
             return
 
     # =========================================================
-    # 속도 발행
+    # 속도 명령 발행
     # =========================================================
     def publish_velocity(
         self,
@@ -566,7 +602,7 @@ class MissionManager(Node):
         self.cmd_vel_pub.publish(msg)
 
     # =========================================================
-    # 정지
+    # TurtleBot4 정지
     # =========================================================
     def stop_robot(self):
 
@@ -591,7 +627,9 @@ def main(args=None):
         pass
 
     finally:
+
         node.stop_robot()
+
         node.destroy_node()
 
         if rclpy.ok():
