@@ -14,7 +14,6 @@ amr_detector.py 와 같은 방식으로 depth 영상을 구독해서 car 박스 
 RGB/depth 는 해상도를 맞춰 둔 압축 토픽(둘 다 704x704)을 쓴다.
   RGB   /robot2/oakd/rgb/image_raw/compressed          (JPEG, bgr8)
   depth /robot2/oakd/stereo/image_raw/compressedDepth  (PNG, 16UC1 mm)
-mission_manager 수정 방법은 amr_detector.py 맨 위 설명을 참고한다.
 """
 
 import os
