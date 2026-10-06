@@ -226,7 +226,7 @@ class MissionManager(Node):
         self.target_detected = False
         self.target_center_x = None
 
-        # amr_detector의 실제 거리 출력이 추가되면 연결한다.
+        # amr_detector가 /amr/detections에 넣어 주는 자동차까지 거리 [m]
         self.distance = None
 
         self.last_detection_time = None
@@ -416,6 +416,7 @@ class MissionManager(Node):
 
             self.target_detected = False
             self.handover_count = 0
+            self.distance = None
 
             return
 
@@ -426,6 +427,14 @@ class MissionManager(Node):
         self.target_center_x = float(
             detection.bbox.center.position.x
         )
+
+        # amr_detector가 넣어 준 거리 [m], 0 이하는 측정 실패
+        distance = 0.0
+        if detection.results:
+            distance = float(
+                detection.results[0].pose.pose.position.z
+            )
+        self.distance = distance if distance > 0.0 else None
 
         self.last_detection_time = (
             self.get_clock().now()
@@ -527,7 +536,7 @@ class MissionManager(Node):
 
                 return
 
-            # 아직 실제 거리값이 연결되지 않았으면 정지
+            # 거리 측정에 실패했으면 정지
             if self.distance is None:
 
                 self.stop_robot()
