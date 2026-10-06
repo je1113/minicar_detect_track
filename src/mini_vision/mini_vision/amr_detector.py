@@ -9,23 +9,47 @@ TurtleBot4 AMR 카메라 토픽 → YOLO 감지 + depth 거리 → /amr/detectio
 depth 영상은 RGB에 정렬되어 있고 해상도도 같다.
 그래서 박스 중심 픽셀 (u, v)를 depth 영상에 그대로 쓴다.
 
+[car / dummy 를 함께 내보내도록 수정했다]
+common.detect() 가 클래스마다 가장 믿을 만한 박스를 1개씩 골라 준다.
+target_classes 기본값은 ['car', 'dummy'] 이다 (webcam_detector 와 같은 방식).
+
 거리는 표준 메시지의 빈 칸에 넣는다. 새 토픽은 만들지 않는다.
   /amr/detections (vision_msgs/Detection2DArray)
-    detections[0].bbox.center.position.x/y   박스 중심 픽셀 (기존)
-    detections[0].results[0].pose.pose.position.z
-                                             자동차까지 거리 [m] (추가)
-                                             측정 실패 시 0.0
+    detections            car 최대 1개 + dummy 최대 1개 (순서: car, dummy)
+                          감지되지 않은 클래스는 빠진다
+    detections[i].results[0].hypothesis.class_id
+                          'car' 또는 'dummy'
+    detections[i].bbox.center.position.x/y   박스 중심 픽셀 (기존)
+    detections[i].results[0].pose.pose.position.z
+                          car 까지 거리 [m] (추가), 측정 실패 시 0.0
+                          dummy 는 거리를 재지 않고 항상 0.0
+  주의: dummy 만 보이면 detections[0] 은 dummy 다. 받는 쪽은 detections[0] 을
+  car 라고 가정하지 말고 class_id 로 car 를 골라야 한다.
 
 ----------------------------------------------------------------------
 mission_manager 수정 방법 (mini_control/mission_manager.py)
 ----------------------------------------------------------------------
+[car 고르기 - 아직 안 했다, mission_manager 에서 해야 한다]
+dummy 가 같은 토픽에 섞여 오므로 amr_detection_callback() 은
+msg.detections[0] 을 그대로 쓰지 않고 class_id 가 'car' 인 것만 골라야 한다.
+(안 하면 car 가 안 보이고 dummy 만 보일 때 dummy 를 car 로 착각한다.)
+
+       cars = [
+           d for d in msg.detections
+           if d.results and d.results[0].hypothesis.class_id == 'car'
+       ]
+       if len(cars) == 0:
+           ...
+       detection = cars[0]
+
+[거리 연결 - 아직 안 했다]
 지금 mission_manager는 self.distance 가 항상 None 이라서
 FOLLOWING 상태에서 정지 명령만 보낸다. 아래 두 곳만 고치면 된다.
 구독 토픽(/amr/detections)과 launch 는 바꿀 필요가 없다.
 
 1) amr_detection_callback() 의 "자동차 감지 실패" 분기에 추가
 
-       if len(msg.detections) == 0:
+       if len(cars) == 0:
            self.target_detected = False
            self.handover_count = 0
            self.distance = None          # 추가
@@ -72,6 +96,36 @@ from mini_vision.common import detect, run_node
 COMPRESSED_DEPTH_HEADER_SIZE = 12
 
 
+def draw_distances(image, message, distances):
+    """
+    거리 추가를 위해 수정했다.
+
+    박스 아래에 그 박스까지의 거리를 글자로 쓴다. 측정 실패는 N/A.
+    distances 는 message.detections 와 같은 순서이고,
+    거리를 재지 않은 박스(dummy)는 None 이라서 건너뛴다.
+    """
+    for detection, distance in zip(message.detections, distances):
+        if distance is None:
+            continue
+
+        x1 = int(
+            detection.bbox.center.position.x - detection.bbox.size_x / 2
+        )
+        y2 = int(
+            detection.bbox.center.position.y + detection.bbox.size_y / 2
+        )
+
+        text = f'{distance:.2f} m' if distance > 0.0 else 'N/A'
+
+        # 박스 아래에 쓰고, 화면 아래로 넘어가면 박스 안쪽에 쓴다.
+        ty = y2 + 22 if y2 + 22 < image.shape[0] else y2 - 8
+
+        cv2.putText(
+            image, text, (max(x1, 0), ty),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2
+        )
+
+
 class AmrDetector(Node):
     def __init__(self):
         super().__init__('amr_detector')
@@ -92,7 +146,7 @@ class AmrDetector(Node):
             'camera_topic': '/robot2/oakd/rgb/image_raw/compressed',
             'model_path': default_model_path,
             'detection_topic': '/amr/detections',
-            'target_class': 'car',
+            'target_classes': ['car', 'dummy'],
             'confidence': 0.8,
             'device': 'cpu',
             'show_window': True,
@@ -133,13 +187,17 @@ class AmrDetector(Node):
             f"YOLO classes: {self.model.names}"
         )
 
-        # target_class 확인
-        if self.p['target_class'] not in self.model.names.values():
-            raise ValueError(
-                f"모델에 클래스가 없습니다: "
-                f"{self.p['target_class']}, "
-                f"available={self.model.names}"
-            )
+        # target_classes 확인
+        if not self.p['target_classes']:
+            raise ValueError('target_classes에 클래스 이름을 지정하세요.')
+
+        for name in self.p['target_classes']:
+            if name not in self.model.names.values():
+                raise ValueError(
+                    f"모델에 클래스가 없습니다: "
+                    f"{name}, "
+                    f"available={self.model.names}"
+                )
 
         # ROS publisher
         self.bridge = CvBridge()
@@ -278,16 +336,20 @@ class AmrDetector(Node):
                 self.model,
                 frame,
                 header,
-                self.p['target_class'],
+                self.p['target_classes'],
                 self.p['confidence'],
                 self.p['device']
             )
 
             # 거리 추가를 위해 수정했다:
-            # 박스 중심 거리를 results[0].pose.pose.position.z 에 넣는다.
-            distance = 0.0
-            if message.detections:
-                detection = message.detections[0]
+            # car 박스 중심 거리를 results[0].pose.pose.position.z 에 넣는다.
+            # dummy 는 거리가 필요 없어서 재지 않는다 (z 는 0.0 그대로).
+            distances = []
+            for detection in message.detections:
+                if detection.results[0].hypothesis.class_id != 'car':
+                    distances.append(None)
+                    continue
+
                 distance = self.measure_distance(
                     detection.bbox.center.position.x,
                     detection.bbox.center.position.y,
@@ -295,6 +357,7 @@ class AmrDetector(Node):
                     header.stamp
                 )
                 detection.results[0].pose.pose.position.z = distance
+                distances.append(distance)
 
             # 감지하지 못하면 detect()가 빈 Detection2DArray를 반환한다.
             self.publisher.publish(message)
@@ -303,16 +366,8 @@ class AmrDetector(Node):
             if self.p['show_window']:
                 plot = result.plot()
 
-                # 거리 추가를 위해 수정했다: 화면에 거리 표시
-                if message.detections:
-                    text = (
-                        f'dist {distance:.2f} m'
-                        if distance > 0.0 else 'dist N/A'
-                    )
-                    cv2.putText(
-                        plot, text, (10, 25),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2
-                    )
+                # 거리 추가를 위해 수정했다: car 박스 아래에 거리 표시
+                draw_distances(plot, message, distances)
 
                 cv2.imshow(
                     'AMR YOLO',
