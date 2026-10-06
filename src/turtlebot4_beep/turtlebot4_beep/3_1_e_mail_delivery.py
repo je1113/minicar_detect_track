@@ -19,7 +19,7 @@
 import rclpy
 
 from turtlebot4_navigation.turtlebot4_navigator import TurtleBot4Directions, TurtleBot4Navigator
-
+import math
 
 def main(args=None):
     rclpy.init(args=args)
@@ -44,7 +44,7 @@ def main(args=None):
     # Prepare goal pose options
     goal_options = [
         {'name': 'Home',
-         'pose': navigator.getPoseStamped([-0.6, 0.0], TurtleBot4Directions.NORTH)},
+         'pose': navigator.getPoseStamped([0.0, 0.0], TurtleBot4Directions.NORTH)},
 
         # {'name': 'Position 1',
         #  'pose': navigator.getPoseStamped([-1.7, -0.1], TurtleBot4Directions.EAST)},
@@ -64,16 +64,13 @@ def main(args=None):
     # goal_pose.append(navigator.getPoseStamped([-0.711899, -0.612125], 0.606873))
 
         {'name': 'Position 1',
-         'pose': navigator.getPoseStamped([-1.55069, 0.0668084], -2.5896)},
+         'pose': navigator.getPoseStamped([1.861606, 0.813928], TurtleBot4Directions.SOUTH)},
 
         {'name': 'Position 2',
-         'pose': navigator.getPoseStamped([-0.761671, -0.852567], -1.02024)},
+         'pose': navigator.getPoseStamped([1.180586, -0.985902], TurtleBot4Directions.WEST)},
 
         {'name': 'Position 3',
-         'pose': navigator.getPoseStamped([0.0343325, -1.96793], 0.21976)},
-
-        {'name': 'Position 4',
-         'pose': navigator.getPoseStamped([-0.711899, -0.0612125], 0.606873)},
+         'pose': navigator.getPoseStamped([0.64, 1.84], math.degrees(-2.27))},
 
         {'name': 'Exit',
          'pose': None}

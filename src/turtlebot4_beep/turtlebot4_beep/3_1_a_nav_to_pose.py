@@ -19,7 +19,7 @@
 import rclpy
 
 from turtlebot4_navigation.turtlebot4_navigator import TurtleBot4Directions, TurtleBot4Navigator
-
+import math
 
 def main():
     rclpy.init()
@@ -43,7 +43,7 @@ def main():
 
     # Set goal poses
     # goal_pose = navigator.getPoseStamped([-13.0, 9.0], TurtleBot4Directions.EAST)
-    goal_pose = navigator.getPoseStamped([-1.55, 0.066], TurtleBot4Directions.EAST)
+    goal_pose = navigator.getPoseStamped([0.64, 1.84], math.degrees(-2.27))
 
 #   Position(-1.55069, 0.0668084, 0), Orientation(0, 0, -0.962154, 0.272507) = Angle: -2.5896
 

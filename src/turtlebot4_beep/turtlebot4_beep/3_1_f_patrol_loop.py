@@ -28,6 +28,7 @@ from rclpy.qos import qos_profile_sensor_data
 
 from sensor_msgs.msg import BatteryState
 from turtlebot4_navigation.turtlebot4_navigator import TurtleBot4Directions, TurtleBot4Navigator
+import math
 
 BATTERY_HIGH = 0.95
 BATTERY_LOW = 0.2  # when the robot will go charge
@@ -89,16 +90,19 @@ def main(args=None):
 
     # Prepare goal poses
     goal_pose = []
+    goal_pose.append(navigator.getPoseStamped([1.861606, 0.813928], TurtleBot4Directions.SOUTH))
+    goal_pose.append(navigator.getPoseStamped([1.180586, -0.985902], TurtleBot4Directions.WEST))
+    goal_pose.append(navigator.getPoseStamped([0.64, 1.84], math.degrees(-2.27)))
     # goal_pose.append(navigator.getPoseStamped([-5.0, 1.0], TurtleBot4Directions.EAST))
     # goal_pose.append(navigator.getPoseStamped([-5.0, -23.0], TurtleBot4Directions.NORTH))
     # goal_pose.append(navigator.getPoseStamped([9.0, -23.0], TurtleBot4Directions.NORTH_WEST))
     # goal_pose.append(navigator.getPoseStamped([10.0, 2.0], TurtleBot4Directions.WEST))
 
     # goal_pose.append(navigator.getPoseStamped([-1.55069, 0.0668084], -2.5896))
-    goal_pose.append(navigator.getPoseStamped([-1.55069, 0.0668084], TurtleBot4Directions.WEST))
-    goal_pose.append(navigator.getPoseStamped([-0.761671, -0.852567], TurtleBot4Directions.SOUTH))
-    goal_pose.append(navigator.getPoseStamped([0.0343325, -1.96793], TurtleBot4Directions.EAST))
-    goal_pose.append(navigator.getPoseStamped([-0.711899, -0.0612125], TurtleBot4Directions.NORTH))
+    #goal_pose.append(navigator.getPoseStamped([-1.55069, 0.0668084], TurtleBot4Directions.WEST))
+    #goal_pose.append(navigator.getPoseStamped([-0.761671, -0.852567], TurtleBot4Directions.SOUTH))
+    #goal_pose.append(navigator.getPoseStamped([0.0343325, -1.96793], TurtleBot4Directions.EAST))
+    #goal_pose.append(navigator.getPoseStamped([-0.711899, -0.0612125], TurtleBot4Directions.NORTH))
 
 
     while True:
@@ -115,7 +119,7 @@ def main(args=None):
             elif (battery_percent < BATTERY_LOW):
                 # Go near the dock
                 navigator.info('Docking for charge')
-                navigator.startToPose(navigator.getPoseStamped([-1.0, 1.0],
+                navigator.startToPose(navigator.getPoseStamped([0.0,0.0],
                                       TurtleBot4Directions.EAST))
                 navigator.dock()
 

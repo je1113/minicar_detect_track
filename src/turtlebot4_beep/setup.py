@@ -32,7 +32,12 @@ setup(
             '2_1_d_capture_image = turtlebot4_beep.2_1_d_capture_image:main',
             'depth_checker = turtlebot4_beep.depth_checker:main',
             '2_1_e_capture_comp_image = turtlebot4_beep.2_1_e_capture_comp_image:main',
-
+            '3_1_a_nav_to_pose = turtlebot4_beep.3_1_a_nav_to_pose:main',
+            '3_1_b_nav_through_poses = turtlebot4_beep.3_1_b_nav_through_poses:main',
+            '3_1_c_follow_waypoints = turtlebot4_beep.3_1_c_follow_waypoints:main',
+            '3_1_d_create_path = turtlebot4_beep.3_1_d_create_path:main',
+            '3_1_e_mail_delivery = turtlebot4_beep.3_1_e_mail_delivery:main',
+            '3_1_f_patrol_loop = turtlebot4_beep.3_1_f_patrol_loop:main',
         ],
     },
 )
