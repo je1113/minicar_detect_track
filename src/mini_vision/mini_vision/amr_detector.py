@@ -9,28 +9,29 @@ TurtleBot4 AMR 카메라 토픽 → YOLO 감지 + depth 거리 → /amr/detectio
 depth 영상은 RGB에 정렬되어 있고 해상도도 같다.
 그래서 박스 중심 픽셀 (u, v)를 depth 영상에 그대로 쓴다.
 
-[car / dummy 를 함께 내보내도록 수정했다]
-common.detect() 가 클래스마다 가장 믿을 만한 박스를 1개씩 골라 준다.
-target_classes 기본값은 ['car', 'dummy'] 이다 (webcam_detector 와 같은 방식).
+[dummy 를 화면에 그리도록 수정했다]
+target_classes (기본 ['car', 'dummy']) 를 모두 감지해서 YOLO 화면에 박스를 그린다.
+  - amr_detector        'AMR YOLO' 창
+  - amr_detector_topic  'AMR YOLO' 창과 /amr/image_annotated (car 초록, dummy 주황)
+토픽(/amr/detections)에는 publish_classes (기본 ['car']) 만 내보낸다.
+dummy 는 중심 좌표도 거리도 필요 없어서 토픽에 싣지 않는다.
 
 거리는 표준 메시지의 빈 칸에 넣는다. 새 토픽은 만들지 않는다.
   /amr/detections (vision_msgs/Detection2DArray)
-    detections            car 최대 1개 + dummy 최대 1개 (순서: car, dummy)
-                          감지되지 않은 클래스는 빠진다
-    detections[i].results[0].hypothesis.class_id
-                          'car' 또는 'dummy'
-    detections[i].bbox.center.position.x/y   박스 중심 픽셀 (기존)
-    detections[i].results[0].pose.pose.position.z
-                          car 까지 거리 [m] (추가), 측정 실패 시 0.0
-                          dummy 는 거리를 재지 않고 항상 0.0
-  주의: dummy 만 보이면 detections[0] 은 dummy 다. 받는 쪽은 detections[0] 을
-  car 라고 가정하지 말고 class_id 로 car 를 골라야 한다.
+    detections[0].bbox.center.position.x/y   car 박스 중심 픽셀 (기존)
+    detections[0].results[0].pose.pose.position.z
+                                             car 까지 거리 [m] (추가)
+                                             측정 실패 시 0.0
+  publish_classes 에 'dummy' 를 넣으면 dummy 도 토픽에 실리지만 거리는 0.0 이다.
+  그때는 dummy 만 보이면 detections[0] 이 dummy 가 되므로 받는 쪽이 class_id 로
+  car 를 골라야 한다.
 
 ----------------------------------------------------------------------
 mission_manager 수정 방법 (mini_control/mission_manager.py)
 ----------------------------------------------------------------------
-[car 고르기 - 아직 안 했다, mission_manager 에서 해야 한다]
-dummy 가 같은 토픽에 섞여 오므로 amr_detection_callback() 은
+[car 고르기 - 기본값에서는 필요 없다]
+기본값(publish_classes=['car'])에서는 토픽에 car 만 실려서 지금 코드 그대로 된다.
+publish_classes 에 'dummy' 를 넣을 때만 amr_detection_callback() 이
 msg.detections[0] 을 그대로 쓰지 않고 class_id 가 'car' 인 것만 골라야 한다.
 (안 하면 car 가 안 보이고 dummy 만 보일 때 dummy 를 car 로 착각한다.)
 
@@ -49,7 +50,7 @@ FOLLOWING 상태에서 정지 명령만 보낸다. 아래 두 곳만 고치면 �
 
 1) amr_detection_callback() 의 "자동차 감지 실패" 분기에 추가
 
-       if len(cars) == 0:
+       if len(msg.detections) == 0:
            self.target_detected = False
            self.handover_count = 0
            self.distance = None          # 추가
@@ -146,7 +147,8 @@ class AmrDetector(Node):
             'camera_topic': '/robot2/oakd/rgb/image_raw/compressed',
             'model_path': default_model_path,
             'detection_topic': '/amr/detections',
-            'target_classes': ['car', 'dummy'],
+            'target_classes': ['car', 'dummy'],   # 감지해서 화면에 그릴 클래스
+            'publish_classes': ['car'],           # 토픽에 실을 클래스
             'confidence': 0.8,
             'device': 'cpu',
             'show_window': True,
@@ -197,6 +199,13 @@ class AmrDetector(Node):
                     f"모델에 클래스가 없습니다: "
                     f"{name}, "
                     f"available={self.model.names}"
+                )
+
+        for name in self.p['publish_classes']:
+            if name not in self.p['target_classes']:
+                raise ValueError(
+                    f"publish_classes 의 {name} 이(가) "
+                    f"target_classes 에 없습니다."
                 )
 
         # ROS publisher
@@ -331,8 +340,8 @@ class AmrDetector(Node):
                 desired_encoding='bgr8'
             )
 
-            # 학습한 amr_best.pt로 객체 탐지
-            message, result = detect(
+            # 학습한 amr_best.pt로 객체 탐지 (target_classes: car, dummy)
+            detected, result = detect(
                 self.model,
                 frame,
                 header,
@@ -340,6 +349,16 @@ class AmrDetector(Node):
                 self.p['confidence'],
                 self.p['device']
             )
+
+            # 토픽에는 publish_classes(기본 car)만 내보낸다.
+            # dummy 는 화면에만 그리고 중심 좌표·거리는 내보내지 않는다.
+            message = Detection2DArray()
+            message.header = detected.header
+            message.detections = [
+                detection for detection in detected.detections
+                if detection.results[0].hypothesis.class_id
+                in self.p['publish_classes']
+            ]
 
             # 거리 추가를 위해 수정했다:
             # car 박스 중심 거리를 results[0].pose.pose.position.z 에 넣는다.

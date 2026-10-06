@@ -1,14 +1,15 @@
 """
 TurtleBot4 AMR 카메라 토픽 → car/dummy 감지 + car depth 거리 → /amr/detections + /amr/image_annotated.
 
-[car / dummy 를 함께 내보내도록 수정했다]
-car 최대 1개 + dummy 최대 1개를 /amr/detections 에 담는다 (amr_detector.py 와 같은 방식).
-class_id 로 구분하며, car 가 안 보이고 dummy 만 보이면 detections[0] 은 dummy 다.
+[dummy 를 화면에 그리도록 수정했다]
+car 와 dummy 를 모두 감지해서 /amr/image_annotated 와 YOLO 창에 그린다
+(amr_detector.py 와 같은 방식).
+/amr/detections 에는 publish_classes (기본 ['car']) 만 내보낸다.
+dummy 는 중심 좌표도 거리도 필요 없어서 토픽에 싣지 않는다.
 
 [거리 추가를 위해 수정했다]
 amr_detector.py 와 같은 방식으로 depth 영상을 구독해서 car 박스 중심 거리 [m]를
-그 detection 의 results[0].pose.pose.position.z 에 넣는다.
-(측정 실패 시 0.0, dummy 는 거리를 재지 않고 항상 0.0)
+그 detection 의 results[0].pose.pose.position.z 에 넣는다. (측정 실패 시 0.0)
 /amr/image_annotated 에는 car 박스 아래에 거리를 글자로 표시한다.
 RGB/depth 는 해상도를 맞춰 둔 압축 토픽(둘 다 704x704)을 쓴다.
   RGB   /robot2/oakd/rgb/image_raw/compressed          (JPEG, bgr8)
@@ -58,7 +59,8 @@ class AmrDetector(Node):
             'camera_topic': '/robot2/oakd/rgb/image_raw/compressed',
             'model_path': default_model_path,
             'detection_topic': '/amr/detections',
-            'target_classes': ['car', 'dummy'],
+            'target_classes': ['car', 'dummy'],   # 감지해서 화면에 그릴 클래스
+            'publish_classes': ['car'],           # 토픽에 실을 클래스
             'confidence': 0.8,
             'device': 'cpu',
             'show_window': True,
@@ -112,6 +114,13 @@ class AmrDetector(Node):
                     f"available={self.model.names}"
                 )
 
+        for name in self.p['publish_classes']:
+            if name not in self.p['target_classes']:
+                raise ValueError(
+                    f"publish_classes 의 {name} 이(가) "
+                    f"target_classes 에 없습니다."
+                )
+
         # ROS publisher
         self.bridge = CvBridge()
 
@@ -121,7 +130,7 @@ class AmrDetector(Node):
             10
         )
 
-        # 감지 결과(publish한 car / dummy)를 그린 영상
+        # 감지 결과(car / dummy)를 그린 영상
         self.annotated_publisher = self.create_publisher(
             Image,
             self.p['annotated_topic'],
@@ -252,8 +261,8 @@ class AmrDetector(Node):
                 desired_encoding='bgr8'
             )
 
-            # 학습한 amr_best.pt로 객체 탐지
-            message, result = detect(
+            # 학습한 amr_best.pt로 객체 탐지 (target_classes: car, dummy)
+            detected, result = detect(
                 self.model,
                 frame,
                 header,
@@ -261,6 +270,16 @@ class AmrDetector(Node):
                 self.p['confidence'],
                 self.p['device']
             )
+
+            # 토픽에는 publish_classes(기본 car)만 내보낸다.
+            # dummy 는 영상에만 그리고 중심 좌표·거리는 내보내지 않는다.
+            message = Detection2DArray()
+            message.header = detected.header
+            message.detections = [
+                detection for detection in detected.detections
+                if detection.results[0].hypothesis.class_id
+                in self.p['publish_classes']
+            ]
 
             # 거리 추가를 위해 수정했다:
             # car 박스 중심 거리를 results[0].pose.pose.position.z 에 넣는다.
@@ -283,8 +302,8 @@ class AmrDetector(Node):
             # 감지하지 못하면 detect()가 빈 Detection2DArray를 반환한다.
             self.publisher.publish(message)
 
-            # publish한 감지 결과만 그린 영상
-            annotated = draw_detections(frame, message)
+            # 감지한 car / dummy 를 모두 그린 영상 (dummy 는 토픽에 안 싣는다)
+            annotated = draw_detections(frame, detected)
 
             # 거리 추가를 위해 수정했다: car 박스 아래에 거리 표시
             draw_distances(annotated, message, distances)
