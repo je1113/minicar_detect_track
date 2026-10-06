@@ -79,13 +79,13 @@ def generate_launch_description():
 
     camera_index_arg = DeclareLaunchArgument(
         'camera_index',
-        default_value='2'
+        default_value='4'
     )
 
     amr_camera_topic_arg = DeclareLaunchArgument(
         'amr_camera_topic',
-        default_value='/robot2/oakd/rgb/image_raw/compressed'
-    )
+        default_value='/robot2/oakd/rgb/preview/image_raw'
+    )  
 
     cmd_vel_topic_arg = DeclareLaunchArgument(
         'cmd_vel_topic',
@@ -179,9 +179,12 @@ def generate_launch_description():
                 'model_path': LaunchConfiguration(
                     'amr_model_path'
                 ),
+
                 'camera_topic': LaunchConfiguration(
                     'amr_camera_topic'
                 ),
+
+                'depth_topic': '/robot2/oakd/stereo/image_raw',
             }
         ]
     )
