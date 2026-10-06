@@ -17,6 +17,7 @@ import rclpy
 from rclpy.node import Node
 
 from geometry_msgs.msg import PointStamped, TwistStamped
+
 from std_msgs.msg import Empty, String
 from vision_msgs.msg import Detection2DArray
 
@@ -39,6 +40,7 @@ class MissionManager(Node):
         # =====================================================
         # 1. ROS2 파라미터 선언
         # =====================================================
+
         self.declare_parameter(
             'target_position_topic',
             '/target/map_position'
@@ -122,6 +124,7 @@ class MissionManager(Node):
         # =====================================================
         # 2. 파라미터 읽기
         # =====================================================
+
         self.target_position_topic = (
             self.get_parameter(
                 'target_position_topic'
@@ -317,26 +320,22 @@ class MissionManager(Node):
             )
             return
 
-        # SEARCHING 상태일 때 자동차 위치를 찾으면 접근 시작
-        if self.state == 'SEARCHING':
-
-            self.approach_target_pub.publish(msg)
-
-            self.state = 'APPROACHING'
-
-            self.get_logger().info(
-                'SEARCHING -> APPROACHING'
-            )
-
+        # 첫 자동차 위치만 approach에 전달
+        if self.state != 'SEARCHING':
             return
 
-        # 취소를 요청한 뒤 새 목표를 보내면 Nav2가 다시 움직이므로 보내지 않는다.
-        if (
-            self.state == 'APPROACHING'
-            and not self.handover_cancel_requested
-        ):
-            # 계속 들어오는 좌표의 goal 교체 여부는 approach가 판단한다.
-            self.approach_target_pub.publish(msg)
+        self.get_logger().info(
+            f'car map position=({msg.point.x:.3f}, '
+            f'{msg.point.y:.3f})'
+        )
+
+        self.approach_target_pub.publish(msg)
+
+        self.state = 'APPROACHING'
+
+        self.get_logger().info(
+            'SEARCHING -> APPROACHING'
+        )
 
     # =========================================================
     # approach 상태 수신
@@ -410,17 +409,32 @@ class MissionManager(Node):
     # AMR 카메라 감지 결과
     # =========================================================
     def amr_detection_callback(self, msg):
+        # car 클래스만 필터링
+        car_detections = []
 
-        # 자동차 감지 실패
-        if len(msg.detections) == 0:
+        for detection in msg.detections:
+            if len(detection.results) == 0:
+                continue
 
+            class_id = detection.results[0].hypothesis.class_id
+
+            if class_id == 'car':
+                car_detections.append(detection)
+
+        # car가 하나도 없으면 detection 실패로 처리
+        if len(car_detections) == 0:
             self.target_detected = False
             self.handover_count = 0
             self.distance = None
-
             return
 
-        detection = msg.detections[0]
+        # car가 여러 개라면 confidence 가장 높은 car 사용
+        detection = max(
+            car_detections,
+            key=lambda d: float(
+                d.results[0].hypothesis.score
+            )
+        )
 
         self.target_detected = True
 
@@ -428,19 +442,33 @@ class MissionManager(Node):
             detection.bbox.center.position.x
         )
 
-        # amr_detector가 넣어 준 거리 [m], 0 이하는 측정 실패
         distance = 0.0
+
         if detection.results:
             distance = float(
                 detection.results[0].pose.pose.position.z
             )
-        self.distance = distance if distance > 0.0 else None
 
+        self.distance = (
+            distance if distance > 0.0 else None
+        )
+
+        
         self.last_detection_time = (
             self.get_clock().now()
         )
 
-        # HANDOVER 상태에서 연속 감지 확인
+        score = float(
+            detection.results[0].hypothesis.score
+        )
+
+        self.get_logger().info(
+            f'AMR car detected: '
+            f'x={self.target_center_x:.1f}, '
+            f'score={score:.2f}'
+        )
+
+        # HANDOVER 상태에서 연속 car 감지 확인
         if self.state == 'HANDOVER':
 
             self.handover_count += 1
@@ -449,7 +477,6 @@ class MissionManager(Node):
                 self.handover_count
                 >= self.handover_detection_count
             ):
-                # Nav2 접근 제어 취소 요청
                 self.approach_cancel_pub.publish(
                     Empty()
                 )
@@ -536,7 +563,6 @@ class MissionManager(Node):
 
                 return
 
-            # 거리 측정에 실패했으면 정지
             if self.distance is None:
 
                 self.stop_robot()
