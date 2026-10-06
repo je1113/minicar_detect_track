@@ -38,6 +38,7 @@ setup(
             'webcam_detector = mini_vision.webcam_detector:main',
             'webcam_localizer = mini_vision.webcam_localizer:main',
             'amr_detector = mini_vision.amr_detector:main',
+            'aruco_calibrator = mini_vision.aruco_calibrator:main',
         ],
     },
 )
