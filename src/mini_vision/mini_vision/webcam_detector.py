@@ -85,7 +85,7 @@ class WebcamDetector(Node):
         self.create_timer(1.0 / self.p['rate_hz'], self.tick)
 
     def tick(self):
-        # 프레임을 읽은 시점의 시간을 이미지와 감지 메시지에 함께 넣는다.
+        # 프레임을 읽은 직후의 시간을 이미지와 감지 메시지에 동일하게 사용한다.
         ok, frame = self.camera.read()
         header = Header()
         header.stamp = self.get_clock().now().to_msg()
