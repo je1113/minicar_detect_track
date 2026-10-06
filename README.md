@@ -46,8 +46,8 @@ ros2 launch turtlebot4_navigation localization.launch.py namespace:=/robot2 map:
 # 터미널 3: Nav2
 ros2 launch turtlebot4_navigation nav2.launch.py namespace:=/robot2
 
-# 터미널 4: RViz에서 "2D Pose Estimate"로 초기 위치 지정
-ros2 launch turtlebot4_viz view_robot.launch.py namespace:=/robot2
+# 터미널 4: RViz(Nav2 costmap·경로 표시)에서 "2D Pose Estimate"로 초기 위치 지정
+ros2 launch turtlebot4_viz view_navigation.launch.py namespace:=/robot2
 ```
 
 필요한 토픽 확인:
