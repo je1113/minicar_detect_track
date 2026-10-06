@@ -34,20 +34,23 @@ source install/setup.bash
 
 새 터미널을 열 때마다 `source ~/minicar_ws/install/setup.bash`를 먼저 실행한다.
 
-### 2. TurtleBot4 위치 추정 + Nav2 (이미 실행 중이면 생략)
+### 2. TurtleBot4 위치 추정 + Nav2 + RViz
 
-`system.launch.py`는 Nav2를 실행하지 않는다.
-approach가 `/robot2/navigate_to_pose`, `/robot2/amcl_pose`를 사용하므로 먼저 띄운다.
+`system.launch.py`가 위치 추정(`localization.launch.py`), Nav2(`nav2.launch.py`), RViz(`view_navigation.launch.py`)를 같이 실행한다.
+맵은 `mini_control/maps/arena_map.yaml`, Nav2 파라미터는 `mini_control/config/nav2.yaml`(TurtleBot4 기본값에서 global costmap `inflation_radius`만 0.05로 변경)을 쓴다.
+
+launch 후 RViz에서 "2D Pose Estimate"로 초기 위치를 지정해야 `/robot2/amcl_pose`가 나오고 approach가 동작한다.
+
+비전/제어 노드만 다시 띄울 때 초기 위치를 매번 다시 잡지 않으려면, 위치 추정·Nav2·RViz를 따로 띄워 두고 system.launch에서는 끈다.
 
 ```bash
-# 터미널 2: 위치 추정
-ros2 launch turtlebot4_navigation localization.launch.py namespace:=/robot2 map:=$HOME/minicar_ws/arena_map.yaml
-
-# 터미널 3: Nav2
-ros2 launch turtlebot4_navigation nav2.launch.py namespace:=/robot2
-
-# 터미널 4: RViz(Nav2 costmap·경로 표시)에서 "2D Pose Estimate"로 초기 위치 지정
+# 각각 별도 터미널에서: 위치 추정 / Nav2 / RViz
+ros2 launch turtlebot4_navigation localization.launch.py namespace:=/robot2 map:=$HOME/minicar_ws/src/mini_control/maps/arena_map.yaml
+ros2 launch turtlebot4_navigation nav2.launch.py namespace:=/robot2 params_file:=$HOME/minicar_ws/src/mini_control/config/nav2.yaml
 ros2 launch turtlebot4_viz view_navigation.launch.py namespace:=/robot2
+
+# 그다음 터미널: 나머지 노드
+ros2 launch mini_control system.launch.py use_localization:=false use_nav2:=false use_rviz:=false
 ```
 
 필요한 토픽 확인:
@@ -72,6 +75,12 @@ ros2 launch mini_control system.launch.py camera_index:=0 target_distance:=0.8 m
 
 | 인자 | 기본값 | 설명 |
 |---|---|---|
+| `namespace` | `/robot2` | 위치 추정 / Nav2 / RViz에 쓸 로봇 namespace |
+| `use_localization` | `true` | 위치 추정(AMCL + map_server) 실행 여부 |
+| `use_nav2` | `true` | Nav2 실행 여부 |
+| `use_rviz` | `true` | RViz 실행 여부 |
+| `map` | `mini_control/maps/arena_map.yaml` | 위치 추정에 쓸 맵 |
+| `nav2_params_file` | `mini_control/config/nav2.yaml` | Nav2 파라미터 파일 |
 | `camera_index` | `2` | 고정 웹캠 번호 (`ls /dev/video*`로 확인) |
 | `amr_camera_topic` | `/robot2/oakd/rgb/image_raw/compressed` | AMR 카메라 토픽 (depth는 `stereo/image_raw/compressedDepth`, 둘 다 704x704) |
 | `cmd_vel_topic` | `/robot2/cmd_vel` | 추종 속도 명령 토픽 |
