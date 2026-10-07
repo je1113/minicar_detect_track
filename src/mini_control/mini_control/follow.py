@@ -38,6 +38,7 @@ def compute_velocity(
     angular_gain,
     max_linear_speed,
     max_angular_speed,
+    center_deadband=0.0,
 ):
     """
     자동차의 상대 방향과 거리로
@@ -87,6 +88,11 @@ def compute_velocity(
     # horizontal_error < 0
     # ========================================================
     angular_z = -angular_gain * horizontal_error
+
+    # 자동차가 화면 가운데 영역 안에 있으면 회전하지 않는다
+    # (horizontal_error는 -1~1, 가운데 1/3이면 deadband = 1/3)
+    if abs(horizontal_error) <= center_deadband:
+        angular_z = 0.0
 
     angular_z = _clamp(
         angular_z,

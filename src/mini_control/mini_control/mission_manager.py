@@ -111,6 +111,13 @@ class MissionManager(Node):
             1.0
         )
 
+        # 자동차 중심이 화면 가운데 이 비율 안에 있으면 회전하지 않는다
+        # (1/3 → 화면 가운데 1/3 구간)
+        self.declare_parameter(
+            'center_deadband_ratio',
+            1.0 / 3.0
+        )
+
         self.declare_parameter(
             'detection_timeout',
             0.5
@@ -222,6 +229,12 @@ class MissionManager(Node):
         self.max_angular_speed = float(
             self.get_parameter(
                 'max_angular_speed'
+            ).value
+        )
+
+        self.center_deadband_ratio = float(
+            self.get_parameter(
+                'center_deadband_ratio'
             ).value
         )
 
@@ -662,6 +675,7 @@ class MissionManager(Node):
                 angular_gain=self.angular_gain,
                 max_linear_speed=self.max_linear_speed,
                 max_angular_speed=self.max_angular_speed,
+                center_deadband=self.center_deadband_ratio,
             )
 
             self.publish_velocity(
