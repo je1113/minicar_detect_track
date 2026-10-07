@@ -101,7 +101,7 @@ class AmrDetector(Node):
             'detection_topic': '/amr/detections',
             'target_classes': ['car', 'dummy'],   # 감지해서 화면에 그릴 클래스
             'publish_classes': ['car'],           # 토픽에 실을 클래스
-            'confidence': 0.8,
+            'confidence': 0.85,
             'device': 'cuda:0',
             'show_window': True,
             # 거리 추가를 위해 수정했다: depth 관련 파라미터
