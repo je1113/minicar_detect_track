@@ -83,7 +83,7 @@ class MissionManager(Node):
 
         self.declare_parameter(
             'target_distance',
-            0.5
+            0.8
         )
 
         self.declare_parameter(
