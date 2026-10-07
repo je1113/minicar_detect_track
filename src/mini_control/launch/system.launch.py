@@ -7,12 +7,10 @@
 - mini_vision / amr_detector
 - mini_control / approach
 - mini_control / mission_manager
-- turtlebot4_navigation / localization (use_localization)
-- turtlebot4_navigation / nav2 (use_nav2)
-- turtlebot4_viz / view_navigation (use_rviz)
 
-위치 추정 / Nav2 / RViz를 따로 띄워 둔 경우
-use_localization:=false use_nav2:=false use_rviz:=false 로 끈다.
+위치 추정(localization) / Nav2 / RViz는 여기서 실행하지 않는다.
+먼저 따로 실행해 두고, RViz의 "2D Pose Estimate"로 초기 위치를 지정해야
+amcl_pose가 나오고 approach가 goal을 보낼 수 있다.
 """
 
 import os
@@ -20,9 +18,7 @@ import os
 from ament_index_python.packages import get_package_share_directory
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
-from launch.conditions import IfCondition
-from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 
 from launch_ros.actions import Node
@@ -42,14 +38,6 @@ def generate_launch_description():
         'mini_control'
     )
 
-    tb4_navigation_share = get_package_share_directory(
-        'turtlebot4_navigation'
-    )
-
-    tb4_viz_share = get_package_share_directory(
-        'turtlebot4_viz'
-    )
-
     # =========================================================
     # 2. 설정 / 모델 경로
     # =========================================================
@@ -63,18 +51,6 @@ def generate_launch_description():
         mini_control_share,
         'config',
         'params.yaml'
-    )
-
-    map_default = os.path.join(
-        mini_control_share,
-        'maps',
-        'arena_map.yaml'
-    )
-
-    nav2_params_default = os.path.join(
-        mini_control_share,
-        'config',
-        'nav2.yaml'
     )
 
     webcam_model_default = os.path.join(
@@ -92,36 +68,6 @@ def generate_launch_description():
     # =========================================================
     # 3. Launch 인자
     # =========================================================
-    namespace_arg = DeclareLaunchArgument(
-        'namespace',
-        default_value='/robot2'
-    )
-
-    use_localization_arg = DeclareLaunchArgument(
-        'use_localization',
-        default_value='true'
-    )
-
-    use_nav2_arg = DeclareLaunchArgument(
-        'use_nav2',
-        default_value='true'
-    )
-
-    use_rviz_arg = DeclareLaunchArgument(
-        'use_rviz',
-        default_value='true'
-    )
-
-    map_arg = DeclareLaunchArgument(
-        'map',
-        default_value=map_default
-    )
-
-    nav2_params_arg = DeclareLaunchArgument(
-        'nav2_params_file',
-        default_value=nav2_params_default
-    )
-
     webcam_model_arg = DeclareLaunchArgument(
         'webcam_model_path',
         default_value=webcam_model_default
@@ -183,61 +129,8 @@ def generate_launch_description():
     )
 
     # =========================================================
-    # 4. TurtleBot4 위치 추정 / Nav2 / RViz
-    #
-    # RViz의 "2D Pose Estimate"로 초기 위치를 지정해야
-    # amcl_pose가 나오고 approach가 goal을 보낼 수 있다.
+    # 4. 추종 방식
     # =========================================================
-    localization_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(
-                tb4_navigation_share,
-                'launch',
-                'localization.launch.py'
-            )
-        ),
-        launch_arguments={
-            'namespace': LaunchConfiguration('namespace'),
-            'map': LaunchConfiguration('map'),
-        }.items(),
-        condition=IfCondition(
-            LaunchConfiguration('use_localization')
-        )
-    )
-
-    nav2_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(
-                tb4_navigation_share,
-                'launch',
-                'nav2.launch.py'
-            )
-        ),
-        launch_arguments={
-            'namespace': LaunchConfiguration('namespace'),
-            'params_file': LaunchConfiguration('nav2_params_file'),
-        }.items(),
-        condition=IfCondition(
-            LaunchConfiguration('use_nav2')
-        )
-    )
-
-    rviz_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(
-                tb4_viz_share,
-                'launch',
-                'view_navigation.launch.py'
-            )
-        ),
-        launch_arguments={
-            'namespace': LaunchConfiguration('namespace'),
-        }.items(),
-        condition=IfCondition(
-            LaunchConfiguration('use_rviz')
-        )
-    )
-
     # cmd_vel: 속도 직접 제어 (기존), nav: Nav2 goal 로 추종
     follow_mode_arg = DeclareLaunchArgument(
         'follow_mode',
@@ -377,13 +270,6 @@ def generate_launch_description():
     # 10. 전체 노드 반환
     # =========================================================
     return LaunchDescription([
-        namespace_arg,
-        use_localization_arg,
-        use_nav2_arg,
-        use_rviz_arg,
-        map_arg,
-        nav2_params_arg,
-
         webcam_model_arg,
         amr_model_arg,
         camera_index_arg,
@@ -398,10 +284,6 @@ def generate_launch_description():
         max_angular_speed_arg,
         detection_timeout_arg,
         follow_mode_arg,
-
-        localization_launch,
-        nav2_launch,
-        rviz_launch,
 
         webcam_detector_node,
         webcam_localizer_node,
