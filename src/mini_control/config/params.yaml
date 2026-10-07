@@ -30,7 +30,7 @@ mission_manager:
     image_width: 640
 
     # 추종할 때 자동차와 유지할 목표 거리 [m]
-    target_distance: 0.3
+    target_distance: 0.5
 
     # 이 거리보다 가까우면 전진하지 않음 [m]
     min_distance: 0.5
