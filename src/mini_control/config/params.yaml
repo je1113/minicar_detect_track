@@ -48,12 +48,14 @@ mission_manager:
     # 마지막 자동차 감지를 유효하게 보는 시간 [s]
     detection_timeout: 0.5
 
-    # HANDOVER → FOLLOWING 전환에 필요한 연속 감지 횟수
-    handover_detection_count: 3
+    # 이 시간 동안 자동차를 한 번도 못 보면 LOST [s]
+    # (detection_timeout 이후 lost_timeout 전까지는 멈춰서 기다린다)
+    lost_timeout: 2.0
 
     # LOST 상태에서 자동차를 다시 찾을 때 제자리 회전 속도 [rad/s]
+    # 마지막으로 본 쪽으로 돈다. 본 적이 없으면 부호대로 돈다.
     # 양수: 반시계(좌회전), 음수: 시계(우회전)
-    lost_angular_speed: 0.5
+    lost_angular_speed: 0.3
 
 
 approach:

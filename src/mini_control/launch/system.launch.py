@@ -182,11 +182,6 @@ def generate_launch_description():
         default_value='0.5'
     )
 
-    handover_detection_count_arg = DeclareLaunchArgument(
-        'handover_detection_count',
-        default_value='3'
-    )
-
     # =========================================================
     # 4. TurtleBot4 위치 추정 / Nav2 / RViz
     #
@@ -364,13 +359,6 @@ def generate_launch_description():
                     LaunchConfiguration('detection_timeout'),
                     value_type=float
                 ),
-
-                'handover_detection_count': ParameterValue(
-                    LaunchConfiguration(
-                        'handover_detection_count'
-                    ),
-                    value_type=int
-                ),
             }
         ]
     )
@@ -399,7 +387,6 @@ def generate_launch_description():
         max_linear_speed_arg,
         max_angular_speed_arg,
         detection_timeout_arg,
-        handover_detection_count_arg,
 
         localization_launch,
         nav2_launch,
