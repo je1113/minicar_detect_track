@@ -152,7 +152,7 @@ class ApproachParams:
     view_offset_x: float = 0.6755
     view_offset_y: float = 0.8150
 
-    retarget_threshold: float = 0.3
+    retarget_threshold: float = 0.1
 
     @classmethod
     def declare_and_load(cls, node: Node) -> 'ApproachParams':
