@@ -121,6 +121,13 @@ class MissionManager(Node):
             3
         )
 
+        # LOST 상태에서 자동차를 다시 찾을 때 제자리 회전 속도 [rad/s]
+        # 양수: 반시계(좌회전), 음수: 시계(우회전)
+        self.declare_parameter(
+            'lost_angular_speed',
+            0.5
+        )
+
         # =====================================================
         # 2. 파라미터 읽기
         # =====================================================
@@ -218,6 +225,12 @@ class MissionManager(Node):
         self.handover_detection_count = int(
             self.get_parameter(
                 'handover_detection_count'
+            ).value
+        )
+
+        self.lost_angular_speed = float(
+            self.get_parameter(
+                'lost_angular_speed'
             ).value
         )
 
@@ -594,8 +607,6 @@ class MissionManager(Node):
         # -----------------------------------------------------
         if self.state == 'LOST':
 
-            self.stop_robot()
-
             # 다시 AMR 카메라에서 자동차를 찾음
             if (
                 self.target_detected
@@ -606,6 +617,14 @@ class MissionManager(Node):
                 self.get_logger().info(
                     'LOST -> FOLLOWING'
                 )
+
+                return
+
+            # 찾을 때까지 한 방향으로 제자리 회전
+            self.publish_velocity(
+                0.0,
+                self.lost_angular_speed
+            )
 
             return
 

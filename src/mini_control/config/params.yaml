@@ -51,6 +51,10 @@ mission_manager:
     # HANDOVER → FOLLOWING 전환에 필요한 연속 감지 횟수
     handover_detection_count: 3
 
+    # LOST 상태에서 자동차를 다시 찾을 때 제자리 회전 속도 [rad/s]
+    # 양수: 반시계(좌회전), 음수: 시계(우회전)
+    lost_angular_speed: 0.5
+
 
 approach:
   ros__parameters:
