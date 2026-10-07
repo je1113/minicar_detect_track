@@ -9,7 +9,8 @@
 
 목표 좌표를 계산했다고 도달이 보장되지는 않으므로, 최종 상태는 Nav2 결과로 정한다.
 Nav2 가 실패하면(서버 없음/거절/abort) fallback_waypoints 를 거쳐 goal 까지
-cmd_vel 로 직접 이동하고(제자리 회전 → 직진 반복), 그 결과를 최종 상태로 쓴다.
+cmd_vel 로 직접 이동하고(모서리를 원호로 보간한 경로를 pure pursuit 로 추종),
+그 결과를 최종 상태로 쓴다.
 """
 from dataclasses import dataclass, fields
 from enum import Enum
@@ -160,6 +161,8 @@ class Velocity(NamedTuple):
 
 
 STOP = Velocity(0.0, 0.0)
+# 제자리 회전 속도 = ROTATE_GAIN * 방향 오차 [1/s]
+ROTATE_GAIN = 1.5
 
 
 @dataclass(frozen=True)
@@ -168,20 +171,30 @@ class RouteConfig:
 
     linear_speed: float = 0.15
     angular_speed: float = 0.6
+    min_linear_speed: float = 0.03
     min_angular_speed: float = 0.15
-    # 이 거리 안에 들어오면 경로점에 도착한 것으로 본다 [m]
-    position_tolerance: float = 0.08
+    # 가감속 한계. 매 주기 속도 변화를 이 값 * 주기 이하로 보간한다 [m/s^2], [rad/s^2]
+    linear_accel: float = 0.3
+    angular_accel: float = 1.5
+    # pure pursuit 전방 주시 거리 [m]
+    lookahead: float = 0.25
+    # 경로 끝에서 이 거리 안에 들어오면 도착한 것으로 본다 [m]
+    position_tolerance: float = 0.03
+    # 경로 끝을 진행 방향으로 지나쳤을 때 이 옆 방향 오차 안이면 도착으로 본다 [m]
+    overshoot_tolerance: float = 0.1
     # 제자리 회전을 끝내는 방향 오차 [rad]
     yaw_tolerance: float = 0.05
-    # 직진 중 방향 오차가 이보다 커지면 멈추고 다시 제자리 회전 [rad]
-    heading_tolerance: float = 0.4
+    # 출발 전 제자리 회전에서 이 오차 안이면 주행을 시작한다 [rad]
+    align_tolerance: float = 0.15
+    # 주행 중 전방 주시점과의 방향 오차가 이보다 커지면 감속 후 제자리 회전 [rad]
+    heading_tolerance: float = 0.8
 
 
 class RoutePhase(str, Enum):
     """RouteFollower 진행 단계."""
 
     ROTATE = 'ROTATE'
-    DRIVE = 'DRIVE'
+    TRACK = 'TRACK'
     FINAL_ROTATE = 'FINAL_ROTATE'
     DONE = 'DONE'
 
@@ -206,20 +219,82 @@ def route_start_index(robot: Point2D, route: list[Point2D]) -> int:
                key=lambda i: (distance_to_segment(robot, route[i - 1], route[i]), -i))
 
 
+def _densify(points: list[Point2D], step: float) -> list[Point2D]:
+    """연속한 점 사이를 step [m] 이하 간격으로 선형 보간한다."""
+    out = [points[0]]
+    for a, b in zip(points, points[1:]):
+        n = max(1, math.ceil(math.hypot(b.x - a.x, b.y - a.y) / step))
+        out.extend(Point2D(a.x + (b.x - a.x) * k / n, a.y + (b.y - a.y) * k / n)
+                   for k in range(1, n))
+        out.append(b)
+    return out
+
+
+def smooth_path(points: list[Point2D], corner_radius: float,
+                step: float = 0.02) -> list[Point2D]:
+    """
+    꺾은선 경로의 꼭짓점을 반지름 corner_radius 원호로 둥글게 하고 step 간격으로 보간한다.
+
+    원호의 접선 길이는 양쪽 구간 길이의 절반을 넘지 않도록 줄인다.
+    corner_radius 가 0 이면 꺾은선을 그대로 보간한다.
+    """
+    pts = [points[0]]
+    for p in points[1:]:
+        if math.hypot(p.x - pts[-1].x, p.y - pts[-1].y) > 1e-3:
+            pts.append(p)
+
+    corners = [pts[0]]
+    for a, b, c in zip(pts, pts[1:], pts[2:]):
+        len_in = math.hypot(b.x - a.x, b.y - a.y)
+        len_out = math.hypot(c.x - b.x, c.y - b.y)
+        heading_in = math.atan2(b.y - a.y, b.x - a.x)
+        turn = normalize_angle(math.atan2(c.y - b.y, c.x - b.x) - heading_in)
+        if corner_radius <= 0.0 or abs(turn) < 1e-3 or abs(turn) > math.pi - 1e-3:
+            corners.append(b)
+            continue
+        half_tan = math.tan(abs(turn) / 2.0)
+        tangent = min(corner_radius * half_tan, 0.5 * len_in, 0.5 * len_out)
+        radius = tangent / half_tan
+        ux, uy = (b.x - a.x) / len_in, (b.y - a.y) / len_in
+        entry = Point2D(b.x - ux * tangent, b.y - uy * tangent)
+        side = math.copysign(1.0, turn)
+        center = Point2D(entry.x - uy * radius * side, entry.y + ux * radius * side)
+        start = math.atan2(entry.y - center.y, entry.x - center.x)
+        n = max(2, math.ceil(radius * abs(turn) / step))
+        corners.extend(
+            Point2D(center.x + radius * math.cos(start + turn * k / n),
+                    center.y + radius * math.sin(start + turn * k / n))
+            for k in range(n + 1))
+    corners.append(pts[-1])
+    return _densify(corners, step)
+
+
+def _approach(current: float, target: float, max_delta: float) -> float:
+    """값을 target 쪽으로 최대 max_delta 만큼 옮긴다."""
+    return current + max(-max_delta, min(max_delta, target - current))
+
+
 class RouteFollower:
     """
-    경로점을 차례로 '제자리 회전 → 직진' 하고 마지막에 goal yaw 로 맞추는 제어기.
+    보간한 경로를 pure pursuit 로 따라가고 마지막에 goal yaw 로 맞추는 제어기.
 
-    ROS 와 독립적이며, 매 주기 step(현재 map 자세) 로 속도를 얻는다.
+    출발 방향이 크게 틀어져 있으면 먼저 제자리 회전하고, 이후에는 곡선으로 주행한다.
+    속도는 가감속 한계와 남은 거리에 따른 감속으로 매 주기 보간한다.
+    ROS 와 독립적이며, period 마다 step(현재 map 자세) 로 속도를 얻는다.
     """
 
-    def __init__(self, points: list[Point2D], final_yaw: float, config: RouteConfig,
-                 start_index: int = 0) -> None:
-        """points[start_index] 부터 차례로 이동하고 마지막에 final_yaw 로 맞춘다."""
-        self._points = points
+    def __init__(self, path: list[Point2D], final_yaw: float, config: RouteConfig,
+                 period: float) -> None:
+        """smooth_path 로 만든 path 를 따라가고 마지막에 final_yaw 로 맞춘다."""
+        self._path = path
+        self._arc = [0.0]
+        for a, b in zip(path, path[1:]):
+            self._arc.append(self._arc[-1] + math.hypot(b.x - a.x, b.y - a.y))
         self._final_yaw = final_yaw
         self._cfg = config
-        self.index = start_index
+        self._period = period
+        self._last = STOP
+        self.progress = 0
         self.phase = RoutePhase.ROTATE
 
     @property
@@ -227,40 +302,96 @@ class RouteFollower:
         """Goal 위치와 yaw 까지 모두 맞췄는지."""
         return self.phase is RoutePhase.DONE
 
+    @property
+    def remaining(self) -> float:
+        """현재 진행 위치부터 경로 끝까지 남은 길이 [m]."""
+        return self._arc[-1] - self._arc[self.progress]
+
     def step(self, pose: Pose2D) -> Velocity:
         """현재 자세에서 보낼 속도를 계산하고 단계를 진행한다."""
         if self.phase is RoutePhase.DONE:
             return STOP
         if self.phase is RoutePhase.FINAL_ROTATE:
-            return self._rotate_to(self._final_yaw - pose.yaw, RoutePhase.DONE)
+            return self._rotate(self._final_yaw - pose.yaw, self._cfg.yaw_tolerance,
+                                RoutePhase.DONE)
 
-        target = self._points[self.index]
+        self._update_progress(pose)
+        if self._arrived(pose):
+            # 남은 직진 속도는 _rotate 에서 가속도 한계로 줄인다.
+            self.phase = RoutePhase.FINAL_ROTATE
+            return self._rotate(self._final_yaw - pose.yaw, self._cfg.yaw_tolerance,
+                                RoutePhase.DONE)
+
+        target = self._lookahead_point()
         dx, dy = target.x - pose.x, target.y - pose.y
-        if math.hypot(dx, dy) < self._cfg.position_tolerance:
-            self.index += 1
-            self.phase = (RoutePhase.FINAL_ROTATE if self.index >= len(self._points)
-                          else RoutePhase.ROTATE)
-            return STOP
-
-        heading_error = normalize_angle(math.atan2(dy, dx) - pose.yaw)
+        alpha = normalize_angle(math.atan2(dy, dx) - pose.yaw)
         if self.phase is RoutePhase.ROTATE:
-            return self._rotate_to(heading_error, RoutePhase.DRIVE)
-
-        if abs(heading_error) > self._cfg.heading_tolerance:
+            return self._rotate(alpha, self._cfg.align_tolerance, RoutePhase.TRACK)
+        if abs(alpha) > self._cfg.heading_tolerance:
             self.phase = RoutePhase.ROTATE
-            return STOP
-        angular = max(-self._cfg.angular_speed,
-                      min(self._cfg.angular_speed, 2.0 * heading_error))
-        return Velocity(self._cfg.linear_speed, angular)
+            return self._rotate(alpha, self._cfg.align_tolerance, RoutePhase.TRACK)
 
-    def _rotate_to(self, yaw_error: float, next_phase: RoutePhase) -> Velocity:
+        # pure pursuit: 전방 주시점을 지나는 원호의 곡률
+        curvature = 2.0 * math.sin(alpha) / max(math.hypot(dx, dy), 1e-3)
+        speed = self._cfg.linear_speed
+        if abs(curvature) > 1e-6:
+            speed = min(speed, self._cfg.angular_speed / abs(curvature))
+        # 도착 판정 거리에서 속도가 min_linear_speed 까지 떨어지도록,
+        # 가속 한계의 절반으로 여유 있게 감속한다.
+        stop_distance = max(0.0, self.remaining - self._cfg.position_tolerance)
+        speed = min(speed, math.sqrt(self._cfg.linear_accel * stop_distance))
+        speed = max(speed, self._cfg.min_linear_speed)
+        linear = _approach(self._last.linear, speed, self._cfg.linear_accel * self._period)
+        angular = _approach(self._last.angular, curvature * linear,
+                            self._cfg.angular_accel * self._period)
+        return self._output(Velocity(linear, angular))
+
+    def _arrived(self, pose: Pose2D) -> bool:
+        end = self._path[-1]
+        dx, dy = end.x - pose.x, end.y - pose.y
+        if math.hypot(dx, dy) < self._cfg.position_tolerance:
+            return True
+        if len(self._path) < 2 or self.remaining > self._cfg.lookahead:
+            return False
+        # AMCL 보정 등으로 끝점을 살짝 지나쳤으면 되돌아가지 않는다.
+        prev = self._path[-2]
+        length = math.hypot(end.x - prev.x, end.y - prev.y)
+        ux, uy = (end.x - prev.x) / length, (end.y - prev.y) / length
+        along = dx * ux + dy * uy
+        lateral = abs(-dx * uy + dy * ux)
+        return along <= 0.0 and lateral < self._cfg.overshoot_tolerance
+
+    def _update_progress(self, pose: Pose2D) -> None:
+        # 경로 앞쪽만 찾아 진행 위치가 뒤로 가지 않게 한다.
+        window = range(self.progress, len(self._path))
+        self.progress = min(
+            window, key=lambda i: math.hypot(self._path[i].x - pose.x, self._path[i].y - pose.y))
+
+    def _lookahead_point(self) -> Point2D:
+        goal_arc = self._arc[self.progress] + self._cfg.lookahead
+        for i in range(self.progress, len(self._path)):
+            if self._arc[i] >= goal_arc:
+                return self._path[i]
+        return self._path[-1]
+
+    def _rotate(self, yaw_error: float, tolerance: float, next_phase: RoutePhase) -> Velocity:
         yaw_error = normalize_angle(yaw_error)
-        if abs(yaw_error) < self._cfg.yaw_tolerance:
+        if abs(yaw_error) < tolerance and abs(self._last.linear) < 1e-3:
             self.phase = next_phase
-            return STOP
+            return self._output(Velocity(0.0, self._last.angular)
+                                if next_phase is RoutePhase.TRACK else STOP)
+        # 오차가 줄수록 감속해서 목표 각도에 부드럽게 멈춘다.
         speed = max(self._cfg.min_angular_speed,
-                    min(self._cfg.angular_speed, 1.5 * abs(yaw_error)))
-        return Velocity(0.0, math.copysign(speed, yaw_error))
+                    min(self._cfg.angular_speed, ROTATE_GAIN * abs(yaw_error)))
+        dv = self._cfg.linear_accel * self._period
+        dw = self._cfg.angular_accel * self._period
+        return self._output(Velocity(
+            _approach(self._last.linear, 0.0, dv),
+            _approach(self._last.angular, math.copysign(speed, yaw_error), dw)))
+
+    def _output(self, velocity: Velocity) -> Velocity:
+        self._last = velocity
+        return velocity
 
 
 # ------------------------------------------------------------------- parameters
@@ -292,11 +423,16 @@ class ApproachParams:
     odom_topic: str = 'odom'
     # 경로 시작점과 goal 전에 거칠 경로점 [x0, y0, x1, y1, ...] (map) [m]
     fallback_waypoints: tuple = (0.0, 0.0, 2.0, 0.0, 1.79, 1.77)
+    # 경로점 모서리를 둥글게 보간하는 원호 반지름 [m]. 0 이면 꺾은선 그대로
+    fallback_corner_radius: float = 0.3
+    fallback_lookahead: float = 0.25
     fallback_linear_speed: float = 0.15
     fallback_angular_speed: float = 0.6
-    fallback_position_tolerance: float = 0.08
+    fallback_linear_accel: float = 0.3
+    fallback_angular_accel: float = 1.5
+    fallback_position_tolerance: float = 0.03
     fallback_yaw_tolerance: float = 0.05
-    fallback_heading_tolerance: float = 0.4
+    fallback_heading_tolerance: float = 0.8
     # odom 이 이 시간 동안 안 들어오면 정지 후 FAILED [s]
     fallback_odom_timeout: float = 1.0
     # fallback 전체 제한 시간 [s]
@@ -316,6 +452,9 @@ class ApproachParams:
         return RouteConfig(
             linear_speed=self.fallback_linear_speed,
             angular_speed=self.fallback_angular_speed,
+            linear_accel=self.fallback_linear_accel,
+            angular_accel=self.fallback_angular_accel,
+            lookahead=self.fallback_lookahead,
             position_tolerance=self.fallback_position_tolerance,
             yaw_tolerance=self.fallback_yaw_tolerance,
             heading_tolerance=self.fallback_heading_tolerance,
@@ -550,7 +689,9 @@ class ApproachNode(Node):
         goal = request.goal
         points = self._waypoints + [goal.position]
         start = route_start_index(robot.position, points)
-        self._route = RouteFollower(points, goal.yaw, self._params.route_config, start)
+        path = smooth_path([robot.position] + points[start:], self._params.fallback_corner_radius)
+        self._route = RouteFollower(
+            path, goal.yaw, self._params.route_config, FALLBACK_PERIOD_SEC)
         self._route_started = self.get_clock().now()
         self.get_logger().warning(
             f'Nav2 failed -> cmd_vel fallback from ({robot.x:.2f}, {robot.y:.2f}) via '
@@ -574,11 +715,11 @@ class ApproachNode(Node):
             return
 
         pose = self._current_pose()
-        phase, index = self._route.phase, self._route.index
+        phase = self._route.phase
         velocity = self._route.step(pose)
-        if (self._route.phase, self._route.index) != (phase, index):
+        if self._route.phase is not phase:
             self.get_logger().info(
-                f'fallback {self._route.phase.value} point={self._route.index} '
+                f'fallback {self._route.phase.value} remaining={self._route.remaining:.2f}m '
                 f'pose=({pose.x:.2f}, {pose.y:.2f}, {pose.yaw:.2f})')
         if self._route.done:
             self._finish_route(ApproachStatus.ARRIVED)
