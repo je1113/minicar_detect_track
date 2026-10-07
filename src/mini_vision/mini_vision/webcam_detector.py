@@ -30,7 +30,7 @@ class WebcamDetector(Node):
             'model_path': default_model_path,
             'target_classes': ['car', 'dummy'],
             'confidence': 0.8,  # 사용자가 설정한 값. 실제 탐지 결과에 맞춰 조정한다.
-            'device': 'cpu',
+            'device': 'cuda:0',
             'image_width': 640,
             'image_height': 480,
             'rate_hz': 5.0,
