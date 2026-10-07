@@ -57,6 +57,10 @@ mission_manager:
     # 양수: 반시계(좌회전), 음수: 시계(우회전)
     lost_angular_speed: 0.3
 
+    # approach 도착(yaw 정렬 완료) 후 정지한 채 자동차를 감지하며 기다리는 시간 [s]
+    # 이 시간이 지난 뒤 자동차가 보이면 추종, 계속 안 보이면 LOST
+    arrival_hold_time: 2.0
+
 
 approach:
   ros__parameters:

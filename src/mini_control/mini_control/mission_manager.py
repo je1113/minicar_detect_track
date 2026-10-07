@@ -130,6 +130,13 @@ class MissionManager(Node):
             0.3
         )
 
+        # approach가 도착(yaw 정렬까지 완료)한 뒤 정지한 채
+        # 자동차를 감지하며 기다리는 시간 [s]
+        self.declare_parameter(
+            'arrival_hold_time',
+            2.0
+        )
+
         # =====================================================
         # 2. 파라미터 읽기
         # =====================================================
@@ -236,6 +243,12 @@ class MissionManager(Node):
             ).value
         )
 
+        self.arrival_hold_time = float(
+            self.get_parameter(
+                'arrival_hold_time'
+            ).value
+        )
+
         # =====================================================
         # 3. 상태값
         # =====================================================
@@ -252,6 +265,9 @@ class MissionManager(Node):
         self.last_detection_time = None
 
         self.handover_start_time = None
+
+        # HANDOVER 진입 후 추종을 시작하지 않고 정지해 있을 시간 [s]
+        self.handover_hold_time = 0.0
 
         # =====================================================
         # 4. approach 상태
@@ -382,8 +398,11 @@ class MissionManager(Node):
             self.notify_approach_complete()
             return
 
+        # 도착 후 자세가 잡힌 상태에서 잠시 멈춰 감지한다
         if status == ApproachStatus.ARRIVED:
-            self.notify_approach_complete()
+            self.notify_approach_complete(
+                hold_time=self.arrival_hold_time
+            )
             return
 
         self.state = 'SEARCHING'
@@ -408,25 +427,26 @@ class MissionManager(Node):
     # =========================================================
     # 접근 완료 → AMR 카메라 인계
     # =========================================================
-    def notify_approach_complete(self):
+    def notify_approach_complete(self, hold_time=0.0):
 
         if self.state != 'APPROACHING':
             return
 
-        self.start_handover('APPROACHING')
+        self.start_handover('APPROACHING', hold_time)
 
     # =========================================================
-    # HANDOVER 진입: 정지 후 자동차가 보이면 바로 추종한다
+    # HANDOVER 진입: 정지 후 hold_time이 지나고 자동차가 보이면 추종한다
     # =========================================================
-    def start_handover(self, from_state):
+    def start_handover(self, from_state, hold_time=0.0):
 
         self.state = 'HANDOVER'
         self.handover_start_time = self.get_clock().now()
+        self.handover_hold_time = hold_time
 
         self.stop_robot()
 
         self.get_logger().info(
-            f'{from_state} -> HANDOVER'
+            f'{from_state} -> HANDOVER (hold {hold_time:.1f}s)'
         )
 
     # =========================================================
@@ -567,9 +587,16 @@ class MissionManager(Node):
         # -----------------------------------------------------
         if self.state == 'HANDOVER':
 
-            # 자동차가 한 번이라도 보이면 바로 추종
+            # hold_time 동안은 감지만 하고 정지해 있는다
+            holding = (
+                self.seconds_since(self.handover_start_time)
+                < self.handover_hold_time
+            )
+
+            # hold가 끝난 뒤 자동차가 보이면 바로 추종
             if (
-                self.target_detected
+                not holding
+                and self.target_detected
                 and self.detection_is_fresh()
             ):
                 self.approach_cancel_pub.publish(
@@ -581,6 +608,9 @@ class MissionManager(Node):
                 return
 
             self.stop_robot()
+
+            if holding:
+                return
 
             # 멈춘 뒤 lost_timeout 동안 자동차가 안 보이면 다시 회전하며 찾는다
             if self.target_is_lost(since=self.handover_start_time):
