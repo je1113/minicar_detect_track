@@ -27,7 +27,9 @@ dummy 는 중심 좌표도 거리도 필요 없어서 토픽에 싣지 않는다
   car 를 골라야 한다.
 """
 
+import csv
 import os
+import time
 
 import cv2
 from cv_bridge import CvBridge
@@ -107,6 +109,10 @@ class AmrDetector(Node):
             'depth_patch_size': 7,      # 박스 중심 주변 N×N 픽셀
             'depth_min_valid': 5,       # 유효 depth 픽셀이 이보다 적으면 실패
             'depth_max_dt': 0.1,        # RGB와 depth 촬영 시각 허용 차이 (초)
+            # 시간이 원인인지 확인하려고 추가했다: 요약 로그 주기 (초), 0 이면 끈다
+            'time_log_period': 2.0,
+            # 프레임마다 시각 정보를 CSV 로 저장하는 폴더, 빈 문자열이면 저장 안 함
+            'time_log_dir': '~/minicar_time_logs',
         }
 
         for name, value in defaults.items():
@@ -183,6 +189,10 @@ class AmrDetector(Node):
         self.depth_m = None
         self.depth_stamp = None
 
+        # 시간이 원인인지 확인하려고 추가했다.
+        self.reset_time_stats()
+        self.open_time_csv()
+
         self.create_subscription(
             CompressedImage,
             self.p['depth_topic'],
@@ -195,7 +205,215 @@ class AmrDetector(Node):
             f"depth topic: {self.p['depth_topic']}"
         )
 
+        if self.p['time_log_period'] > 0:
+            self.create_timer(
+                float(self.p['time_log_period']),
+                self.log_time_stats
+            )
+
+    # =========================================================
+    # 시간이 원인인지 확인하려고 추가했다: 시간 진단 통계
+    #
+    # 주기마다 아래를 한 줄로 요약한다.
+    #   - RGB / depth 입력 속도
+    #   - 촬영 → 수신 지연 (PC 시각 - header.stamp)
+    #   - RGB 와 직전 depth 의 촬영 시각 차이
+    #   - 거리 측정 실패 횟수와 이유
+    # =========================================================
+    def reset_time_stats(self):
+        self.stat_start = time.monotonic()
+        self.stat_rgb = 0
+        self.stat_depth = 0
+        self.stat_latency = []   # 촬영 → 수신 지연 [s]
+        self.stat_process = []   # image_callback 처리 시간 [ms]
+        self.stat_dt = []        # RGB 시각 - 직전 depth 시각 [s]
+        self.stat_dist_calls = 0
+        self.stat_dist_fail = 0
+        self.stat_dt_over = 0    # depth_max_dt 초과로 실패
+        self.stat_no_depth = 0   # depth 를 아직 못 받아 실패
+
+    def record_frame_times(self, header, row):
+        self.stat_rgb += 1
+
+        stamp = Time.from_msg(header.stamp)
+
+        # 시각을 채우지 않은 메시지는 건너뛴다.
+        if stamp.nanoseconds <= 0:
+            return
+
+        latency = (self.get_clock().now() - stamp).nanoseconds / 1e9
+
+        self.stat_latency.append(latency)
+
+        row['rgb_stamp'] = stamp.nanoseconds / 1e9
+        row['latency'] = latency
+
+        if self.depth_stamp is not None:
+            dt = (stamp - self.depth_stamp).nanoseconds / 1e9
+
+            self.stat_dt.append(dt)
+
+            row['depth_stamp'] = self.depth_stamp.nanoseconds / 1e9
+            row['rgb_minus_depth'] = dt
+
+    # =========================================================
+    # 프레임마다 시각 정보를 CSV 로 저장한다
+    #
+    # 한 줄 = RGB 한 프레임. 컬럼:
+    #   wall_time        PC 시각 (epoch 초)
+    #   rgb_stamp        RGB 촬영 시각 (header.stamp)
+    #   depth_stamp      그 시점에 비교한 직전 depth 의 촬영 시각
+    #   rgb_minus_depth  RGB - depth 촬영 시각 차 [s]
+    #   latency          wall_time - rgb_stamp, 촬영 → 수신 지연 [s]
+    #   process_ms       image_callback 처리 시간 [ms]
+    #   cars             토픽에 실은 car 개수
+    #   distance         첫 car 의 측정 거리 [m] (실패하면 0.0)
+    #   fail_reason      거리 실패 이유 (no_depth / size_mismatch / dt_over / hole)
+    # =========================================================
+    TIME_CSV_COLUMNS = (
+        'wall_time', 'rgb_stamp', 'depth_stamp', 'rgb_minus_depth',
+        'latency', 'process_ms', 'cars', 'distance', 'fail_reason',
+    )
+
+    def open_time_csv(self):
+        self.time_csv = None
+        self.time_csv_writer = None
+
+        directory = str(self.p['time_log_dir']).strip()
+
+        if not directory:
+            return
+
+        try:
+            directory = os.path.expanduser(directory)
+            os.makedirs(directory, exist_ok=True)
+
+            path = os.path.join(
+                directory,
+                time.strftime('amr_detector_%Y%m%d_%H%M%S.csv')
+            )
+
+            self.time_csv = open(
+                path, 'w', newline='', encoding='utf-8'
+            )
+            self.time_csv_writer = csv.writer(self.time_csv)
+            self.time_csv_writer.writerow(self.TIME_CSV_COLUMNS)
+            self.time_csv.flush()
+
+            self.get_logger().info(f'시간 로그 저장: {path}')
+
+        except OSError as error:
+            self.time_csv = None
+            self.time_csv_writer = None
+
+            self.get_logger().error(
+                f'시간 로그 파일을 열 수 없습니다: {error}'
+            )
+
+    def write_time_row(self, row):
+        if self.time_csv is None:
+            return
+
+        def number(key, digits):
+            value = row.get(key)
+
+            return '' if value is None else f'{value:.{digits}f}'
+
+        try:
+            self.time_csv_writer.writerow([
+                f'{time.time():.3f}',
+                number('rgb_stamp', 6),
+                number('depth_stamp', 6),
+                number('rgb_minus_depth', 6),
+                number('latency', 6),
+                number('process_ms', 2),
+                row.get('cars', 0),
+                number('distance', 3),
+                row.get('fail_reason', ''),
+            ])
+            self.time_csv.flush()
+
+        except OSError as error:
+            self.time_csv = None
+            self.time_csv_writer = None
+
+            self.get_logger().error(
+                f'시간 로그 저장 중 오류, 저장을 멈춥니다: {error}'
+            )
+
+    def log_time_stats(self):
+        elapsed = max(time.monotonic() - self.stat_start, 1e-6)
+
+        rgb_hz = self.stat_rgb / elapsed
+        depth_hz = self.stat_depth / elapsed
+
+        parts = [
+            f'RGB {rgb_hz:.1f}Hz',
+            f'depth {depth_hz:.1f}Hz',
+        ]
+
+        latency = self.stat_latency
+
+        if latency:
+            parts.append(
+                f'촬영→수신 지연 평균 {sum(latency) / len(latency):.3f}s '
+                f'(최소 {min(latency):.3f}, 최대 {max(latency):.3f})'
+            )
+
+        if self.stat_process:
+            process = self.stat_process
+
+            parts.append(
+                f'처리 평균 {sum(process) / len(process):.0f}ms '
+                f'(최대 {max(process):.0f})'
+            )
+
+        dt = self.stat_dt
+
+        if dt:
+            parts.append(
+                f'RGB-depth 시각차 평균 {sum(dt) / len(dt):+.3f}s '
+                f'(절대 최대 {max(abs(x) for x in dt):.3f}, '
+                f"허용 {self.p['depth_max_dt']}s)"
+            )
+
+        if self.stat_dist_calls:
+            other = (
+                self.stat_dist_fail
+                - self.stat_dt_over
+                - self.stat_no_depth
+            )
+
+            parts.append(
+                f'거리 실패 {self.stat_dist_fail}/{self.stat_dist_calls} '
+                f'(시각차 초과 {self.stat_dt_over}, '
+                f'depth 없음 {self.stat_no_depth}, 기타 {other})'
+            )
+
+        self.get_logger().info('[시간] ' + ' | '.join(parts))
+
+        # 원인 판단에 도움이 되는 경고
+        if latency and min(latency) < 0.0:
+            self.get_logger().warning(
+                '[시간] 촬영 시각이 PC 시각보다 미래입니다 '
+                f'(최소 지연 {min(latency):.3f}s). '
+                '로봇과 PC 시계가 어긋났을 수 있습니다.'
+            )
+
+        if self.stat_dt_over > 0 and rgb_hz > 0.0:
+            self.get_logger().warning(
+                f'[시간] RGB-depth 시각차가 허용치를 넘어 거리 실패 '
+                f'{self.stat_dt_over}회. 프레임 간격은 '
+                f'{1.0 / rgb_hz:.3f}s 입니다. 최신 depth 한 장만 '
+                f'비교하는 방식의 한계일 수 있습니다.'
+            )
+
+        self.reset_time_stats()
+
     def depth_callback(self, image):
+        # 시간이 원인인지 확인하려고 추가했다.
+        self.stat_depth += 1
+
         # 거리 추가를 위해 수정했다.
         # compressedDepth 는 cv_bridge 로 풀 수 없다.
         # 12바이트 헤더를 건너뛰고 PNG 를 직접 디코딩한다.
@@ -232,7 +450,12 @@ class AmrDetector(Node):
         박스 중심 (u, v) 주변 N×N depth 값 중 0/NaN 을 뺀 중앙값 [m].
         측정할 수 없으면 0.0 을 반환한다.
         """
+        self.distance_fail_reason = ''
+
         if self.depth_m is None:
+            self.stat_no_depth += 1
+            self.distance_fail_reason = 'no_depth'
+
             self.get_logger().warning(
                 'depth 영상을 아직 받지 못했습니다.',
                 throttle_duration_sec=3.0
@@ -246,6 +469,7 @@ class AmrDetector(Node):
                 f'해상도가 다릅니다. 거리를 측정하지 않습니다.',
                 throttle_duration_sec=3.0
             )
+            self.distance_fail_reason = 'size_mismatch'
             return 0.0
 
         # 너무 오래된 depth 로 재지 않도록 촬영 시각 차이를 확인한다.
@@ -253,6 +477,9 @@ class AmrDetector(Node):
             (Time.from_msg(image_stamp) - self.depth_stamp).nanoseconds
         ) / 1e9
         if dt > self.p['depth_max_dt']:
+            self.stat_dt_over += 1
+            self.distance_fail_reason = 'dt_over'
+
             self.get_logger().warning(
                 f'RGB와 depth 시각 차이 {dt:.3f}s > '
                 f"{self.p['depth_max_dt']}s",
@@ -275,6 +502,7 @@ class AmrDetector(Node):
         valid = patch[np.isfinite(patch) & (patch > 0.0)]
 
         if valid.size < self.p['depth_min_valid']:
+            self.distance_fail_reason = 'hole'
             return 0.0
 
         return float(np.median(valid))
@@ -282,6 +510,11 @@ class AmrDetector(Node):
     def image_callback(self, image):
         # 감지 결과는 카메라 영상의 촬영 시각과 frame_id를 그대로 쓴다.
         header = image.header
+
+        # 시간이 원인인지 확인하려고 추가했다.
+        callback_start = time.perf_counter()
+        row = {}
+        self.record_frame_times(header, row)
 
         try:
             # 압축(JPEG) 영상 메시지 → OpenCV BGR 이미지
@@ -328,8 +561,22 @@ class AmrDetector(Node):
                 detection.results[0].pose.pose.position.z = distance
                 distances.append(distance)
 
+                # 시간이 원인인지 확인하려고 추가했다.
+                self.stat_dist_calls += 1
+
+                if distance <= 0.0:
+                    self.stat_dist_fail += 1
+
+                if 'distance' not in row:
+                    row['distance'] = distance
+                    row['fail_reason'] = (
+                        self.distance_fail_reason if distance <= 0.0 else ''
+                    )
+
             # 감지하지 못하면 detect()가 빈 Detection2DArray를 반환한다.
             self.publisher.publish(message)
+
+            row['cars'] = len(message.detections)
 
             # 디버깅 창
             if self.p['show_window']:
@@ -356,7 +603,20 @@ class AmrDetector(Node):
                 throttle_duration_sec=3.0
             )
 
+        finally:
+            # 시간이 원인인지 확인하려고 추가했다.
+            process_ms = (time.perf_counter() - callback_start) * 1000.0
+
+            self.stat_process.append(process_ms)
+
+            row['process_ms'] = process_ms
+            self.write_time_row(row)
+
     def destroy_node(self):
+        if self.time_csv is not None:
+            self.time_csv.close()
+            self.time_csv = None
+
         if self.p['show_window']:
             cv2.destroyAllWindows()
 

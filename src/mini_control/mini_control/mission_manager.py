@@ -19,9 +19,14 @@ approach 연결:
                   추종을 멈출 때는 approach 취소 토픽을 쓴다.
 """
 
+import csv
+import os
+import time
+
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
+from rclpy.time import Time
 
 from geometry_msgs.msg import (
     PointStamped,
@@ -179,6 +184,13 @@ class MissionManager(Node):
             '/robot2/amcl_pose'
         )
 
+        # 시간이 원인인지 확인하려고 추가했다: nav 모드에서 추종 목표를 보낼 때마다
+        # 시각 정보를 CSV 로 저장하는 폴더, 빈 문자열이면 저장 안 함
+        self.declare_parameter(
+            'time_log_dir',
+            '~/minicar_time_logs'
+        )
+
         # nav 모드에서 자동차 좌표를 approach 로 보내는 최소 간격 [s]
         self.declare_parameter(
             'follow_publish_period',
@@ -334,6 +346,12 @@ class MissionManager(Node):
             ).value
         )
 
+        self.time_log_dir = str(
+            self.get_parameter(
+                'time_log_dir'
+            ).value
+        )
+
         self.follow_publish_period = float(
             self.get_parameter(
                 'follow_publish_period'
@@ -378,6 +396,16 @@ class MissionManager(Node):
 
         # amcl_pose 로 받은 로봇 map 위치 (x, y, yaw)
         self.robot_pose = None
+
+        # 시간이 원인인지 확인하려고 추가했다: 각 입력의 header 시각
+        self.last_detection_stamp = None
+        self.robot_pose_stamp = None
+
+        self.time_csv = None
+        self.time_csv_writer = None
+
+        if self.follow_mode == FOLLOW_MODE_NAV:
+            self.open_time_csv()
 
         # nav 모드: 마지막으로 approach 에 보낸 자동차 좌표 (x, y)와 시각
         self.last_follow_target = None
@@ -616,6 +644,8 @@ class MissionManager(Node):
         )
 
         self.target_detected = True
+
+        self.last_detection_stamp = msg.header.stamp
 
         self.target_center_x = float(
             detection.bbox.center.position.x
@@ -885,6 +915,8 @@ class MissionManager(Node):
 
     def robot_pose_callback(self, msg):
 
+        self.robot_pose_stamp = msg.header.stamp
+
         pose = msg.pose.pose
         q = pose.orientation
 
@@ -957,10 +989,136 @@ class MissionManager(Node):
         self.last_follow_target = car
         self.last_follow_time = now
 
+        # 시간이 원인인지 확인하려고 추가했다.
+        # 감지 지연: 영상 촬영 후 지금까지 경과 시간
+        # amcl_pose 나이: 이 좌표 계산에 쓴 로봇 위치가 몇 초 전 것인지
+        detection_age = self.stamp_age(self.last_detection_stamp)
+        pose_age = self.stamp_age(self.robot_pose_stamp)
+
         self.get_logger().info(
             f'follow car map position=({car[0]:.3f}, {car[1]:.3f}) '
-            f'(distance={self.distance:.2f} m)'
+            f'(distance={self.distance:.2f} m, '
+            f'감지 지연={self.format_age(detection_age)}, '
+            f'amcl_pose 나이={self.format_age(pose_age)})'
         )
+
+        self.write_follow_row(
+            detection_age,
+            pose_age,
+            self.distance,
+            car,
+            self.robot_pose,
+        )
+
+    # =========================================================
+    # header 시각이 지금 기준 몇 초 전인지 (시각을 안 채웠으면 None)
+    # =========================================================
+    def stamp_age(self, stamp):
+
+        if stamp is None or (stamp.sec == 0 and stamp.nanosec == 0):
+            return None
+
+        return (
+            self.get_clock().now() - Time.from_msg(stamp)
+        ).nanoseconds / 1e9
+
+    def format_age(self, age):
+
+        return 'N/A' if age is None else f'{age:.2f}s'
+
+    # =========================================================
+    # 추종 목표를 보낼 때마다 시각 정보를 CSV 로 저장한다
+    #
+    # 한 줄 = approach 로 자동차 좌표를 한 번 보낸 시점. 컬럼:
+    #   wall_time       PC 시각 (epoch 초)
+    #   detection_age   감지 영상 촬영 후 경과 시간 [s]
+    #   pose_age        좌표 계산에 쓴 amcl_pose 의 나이 [s]
+    #   distance        AMR 카메라 거리 [m]
+    #   car_x, car_y    계산한 자동차 map 좌표
+    #   robot_x, robot_y, robot_yaw   계산에 쓴 로봇 위치
+    # =========================================================
+    TIME_CSV_COLUMNS = (
+        'wall_time', 'detection_age', 'pose_age', 'distance',
+        'car_x', 'car_y', 'robot_x', 'robot_y', 'robot_yaw',
+    )
+
+    def open_time_csv(self):
+
+        directory = self.time_log_dir.strip()
+
+        if not directory:
+            return
+
+        try:
+            directory = os.path.expanduser(directory)
+            os.makedirs(directory, exist_ok=True)
+
+            path = os.path.join(
+                directory,
+                time.strftime('mission_manager_%Y%m%d_%H%M%S.csv')
+            )
+
+            self.time_csv = open(
+                path, 'w', newline='', encoding='utf-8'
+            )
+            self.time_csv_writer = csv.writer(self.time_csv)
+            self.time_csv_writer.writerow(self.TIME_CSV_COLUMNS)
+            self.time_csv.flush()
+
+            self.get_logger().info(f'시간 로그 저장: {path}')
+
+        except OSError as error:
+            self.time_csv = None
+            self.time_csv_writer = None
+
+            self.get_logger().error(
+                f'시간 로그 파일을 열 수 없습니다: {error}'
+            )
+
+    def write_follow_row(
+        self,
+        detection_age,
+        pose_age,
+        distance,
+        car,
+        robot_pose
+    ):
+
+        if self.time_csv is None:
+            return
+
+        def number(value, digits):
+            return '' if value is None else f'{value:.{digits}f}'
+
+        try:
+            self.time_csv_writer.writerow([
+                f'{time.time():.3f}',
+                number(detection_age, 3),
+                number(pose_age, 3),
+                number(distance, 3),
+                number(car[0], 3),
+                number(car[1], 3),
+                number(robot_pose[0], 3),
+                number(robot_pose[1], 3),
+                number(robot_pose[2], 4),
+            ])
+            self.time_csv.flush()
+
+        except OSError as error:
+            self.time_csv = None
+            self.time_csv_writer = None
+
+            self.get_logger().error(
+                f'시간 로그 저장 중 오류, 저장을 멈춥니다: {error}'
+            )
+
+    def destroy_node(self):
+
+        if self.time_csv is not None:
+            self.time_csv.close()
+            self.time_csv = None
+
+        return super().destroy_node()
 
     # =========================================================
     # nav 모드: 추종 goal 취소
