@@ -7,16 +7,29 @@ APPROACHING
 HANDOVER
 FOLLOWING
 LOST
+DOCKING  (배터리 부족: 도크 앞까지 Nav2 이동 후 Dock 액션)
+DOCKED
 
 approach 연결:
   웹캠 좌표를 approach 목표 토픽으로 넘기고,
   approach 상태(ARRIVED/FAILED/CANCELED)로 다음 상태를 정한다.
+
+배터리:
+  battery_low_threshold 미만이 되면 어떤 상태든 미션을 멈추고 DOCKING으로 간다.
 """
 
+import math
+
+from action_msgs.msg import GoalStatus
+from irobot_create_msgs.action import Dock
+from irobot_create_msgs.msg import DockStatus
+from nav2_msgs.action import NavigateToPose
 import rclpy
+from rclpy.action import ActionClient
 from rclpy.node import Node
 
-from geometry_msgs.msg import PointStamped, TwistStamped
+from geometry_msgs.msg import PointStamped, PoseStamped, TwistStamped
+from sensor_msgs.msg import BatteryState
 
 from std_msgs.msg import Empty, String
 from vision_msgs.msg import Detection2DArray
@@ -144,6 +157,58 @@ class MissionManager(Node):
             2.0
         )
 
+        # -----------------------------------------------------
+        # 배터리 / 도킹
+        # -----------------------------------------------------
+        self.declare_parameter(
+            'battery_topic',
+            '/robot2/battery_state'
+        )
+
+        # 배터리 잔량(0~1)이 이 값 미만이면 도킹하러 간다
+        self.declare_parameter(
+            'battery_low_threshold',
+            0.2
+        )
+
+        self.declare_parameter(
+            'dock_status_topic',
+            '/robot2/dock_status'
+        )
+
+        self.declare_parameter(
+            'nav_action',
+            '/robot2/navigate_to_pose'
+        )
+
+        self.declare_parameter(
+            'dock_action',
+            '/robot2/dock'
+        )
+
+        # 도크 앞 대기 자세 (map) [m, m, rad]
+        # 이 자세에서 Dock 액션이 도크를 볼 수 있어야 한다 (도크 정면 약 0.5~1m)
+        self.declare_parameter(
+            'dock_staging_x',
+            0.0
+        )
+
+        self.declare_parameter(
+            'dock_staging_y',
+            0.0
+        )
+
+        self.declare_parameter(
+            'dock_staging_yaw',
+            0.0
+        )
+
+        # Dock 액션 실패 시 다시 시도하는 횟수
+        self.declare_parameter(
+            'dock_max_retries',
+            2
+        )
+
         # =====================================================
         # 2. 파라미터 읽기
         # =====================================================
@@ -262,6 +327,60 @@ class MissionManager(Node):
             ).value
         )
 
+        self.battery_topic = (
+            self.get_parameter(
+                'battery_topic'
+            ).value
+        )
+
+        self.battery_low_threshold = float(
+            self.get_parameter(
+                'battery_low_threshold'
+            ).value
+        )
+
+        self.dock_status_topic = (
+            self.get_parameter(
+                'dock_status_topic'
+            ).value
+        )
+
+        self.nav_action = (
+            self.get_parameter(
+                'nav_action'
+            ).value
+        )
+
+        self.dock_action = (
+            self.get_parameter(
+                'dock_action'
+            ).value
+        )
+
+        self.dock_staging_x = float(
+            self.get_parameter(
+                'dock_staging_x'
+            ).value
+        )
+
+        self.dock_staging_y = float(
+            self.get_parameter(
+                'dock_staging_y'
+            ).value
+        )
+
+        self.dock_staging_yaw = float(
+            self.get_parameter(
+                'dock_staging_yaw'
+            ).value
+        )
+
+        self.dock_max_retries = int(
+            self.get_parameter(
+                'dock_max_retries'
+            ).value
+        )
+
         # =====================================================
         # 3. 상태값
         # =====================================================
@@ -289,6 +408,29 @@ class MissionManager(Node):
 
         # AMR 카메라가 먼저 자동차를 찾아 Nav2 취소를 요청한 상태
         self.handover_cancel_requested = False
+
+        # =====================================================
+        # 4-1. 배터리 / 도킹 상태
+        # =====================================================
+        self.battery_percentage = None
+        self.is_docked = False
+
+        # 도킹 단계: WAIT_APPROACH → NAVIGATING → DOCKING_ACTION
+        self.dock_phase = None
+        self.dock_start_time = None
+        self.dock_retries = 0
+
+        self.nav_client = ActionClient(
+            self,
+            NavigateToPose,
+            self.nav_action
+        )
+
+        self.dock_client = ActionClient(
+            self,
+            Dock,
+            self.dock_action
+        )
 
         # =====================================================
         # 5. approach Publisher
@@ -340,6 +482,22 @@ class MissionManager(Node):
             Detection2DArray,
             self.amr_detection_topic,
             self.amr_detection_callback,
+            10
+        )
+
+        # TurtleBot4 배터리 상태
+        self.create_subscription(
+            BatteryState,
+            self.battery_topic,
+            self.battery_callback,
+            10
+        )
+
+        # TurtleBot4 도킹 여부
+        self.create_subscription(
+            DockStatus,
+            self.dock_status_topic,
+            self.dock_status_callback,
             10
         )
 
@@ -566,9 +724,213 @@ class MissionManager(Node):
         return elapsed > self.lost_timeout
 
     # =========================================================
+    # 배터리 상태 수신
+    # =========================================================
+    def battery_callback(self, msg):
+
+        self.battery_percentage = float(msg.percentage)
+
+        if self.state in ('DOCKING', 'DOCKED'):
+            return
+
+        if self.battery_percentage >= self.battery_low_threshold:
+            return
+
+        self.get_logger().warning(
+            f'배터리 {self.battery_percentage * 100:.0f}% '
+            f'(< {self.battery_low_threshold * 100:.0f}%), 도킹 시작'
+        )
+
+        self.start_docking()
+
+    def dock_status_callback(self, msg):
+
+        self.is_docked = bool(msg.is_docked)
+
+    # =========================================================
+    # DOCKING 진입: 미션을 멈추고 approach 이동을 취소한다
+    # =========================================================
+    def start_docking(self):
+
+        from_state = self.state
+
+        # 이미 도크 위면 Nav2로 끌어내지 않는다
+        if self.is_docked:
+            self.state = 'DOCKED'
+            self.stop_robot()
+
+            self.get_logger().info(
+                f'{from_state} -> DOCKED (이미 도킹됨)'
+            )
+            return
+
+        self.state = 'DOCKING'
+        self.dock_phase = 'WAIT_APPROACH'
+        self.dock_start_time = self.get_clock().now()
+        self.dock_retries = 0
+
+        self.stop_robot()
+
+        # approach의 Nav2 goal / fallback 주행이 남아 있으면 취소한다
+        self.approach_cancel_pub.publish(Empty())
+
+        self.get_logger().info(
+            f'{from_state} -> DOCKING'
+        )
+
+    # =========================================================
+    # 도크 앞 대기 자세로 Nav2 이동
+    # =========================================================
+    def send_dock_staging_goal(self):
+
+        self.dock_phase = 'NAVIGATING'
+
+        if not self.nav_client.wait_for_server(timeout_sec=1.0):
+            self.get_logger().error(
+                f'{self.nav_action} 서버 없음, 바로 Dock 시도'
+            )
+            self.send_dock_goal()
+            return
+
+        goal = NavigateToPose.Goal()
+
+        pose = PoseStamped()
+        pose.header.frame_id = self.map_frame
+        pose.header.stamp = self.get_clock().now().to_msg()
+        pose.pose.position.x = self.dock_staging_x
+        pose.pose.position.y = self.dock_staging_y
+        pose.pose.orientation.z = math.sin(self.dock_staging_yaw / 2.0)
+        pose.pose.orientation.w = math.cos(self.dock_staging_yaw / 2.0)
+
+        goal.pose = pose
+
+        self.get_logger().info(
+            f'도크 앞으로 이동: ({self.dock_staging_x:.2f}, '
+            f'{self.dock_staging_y:.2f}, {self.dock_staging_yaw:.2f})'
+        )
+
+        future = self.nav_client.send_goal_async(goal)
+        future.add_done_callback(self.dock_staging_goal_response)
+
+    def dock_staging_goal_response(self, future):
+
+        handle = future.result()
+
+        if not handle.accepted:
+            self.get_logger().error('도크 앞 이동 goal 거절, 바로 Dock 시도')
+            self.send_dock_goal()
+            return
+
+        handle.get_result_async().add_done_callback(
+            self.dock_staging_result
+        )
+
+    def dock_staging_result(self, future):
+
+        status = future.result().status
+
+        # Nav2가 실패해도 도크 근처일 수 있으므로 Dock은 시도한다
+        if status != GoalStatus.STATUS_SUCCEEDED:
+            self.get_logger().warning(
+                f'도크 앞 이동 실패 (status {status}), Dock 시도'
+            )
+
+        self.send_dock_goal()
+
+    # =========================================================
+    # Create3 Dock 액션
+    # =========================================================
+    def send_dock_goal(self):
+
+        self.dock_phase = 'DOCKING_ACTION'
+
+        if not self.dock_client.wait_for_server(timeout_sec=1.0):
+            self.get_logger().error(
+                f'{self.dock_action} 서버 없음, 도킹 실패'
+            )
+            self.dock_phase = 'FAILED'
+            return
+
+        self.get_logger().info('Dock 액션 호출')
+
+        future = self.dock_client.send_goal_async(Dock.Goal())
+        future.add_done_callback(self.dock_goal_response)
+
+    def dock_goal_response(self, future):
+
+        handle = future.result()
+
+        if not handle.accepted:
+            self.get_logger().error('Dock goal 거절')
+            self.dock_failed()
+            return
+
+        handle.get_result_async().add_done_callback(
+            self.dock_result
+        )
+
+    def dock_result(self, future):
+
+        result = future.result()
+
+        if (
+            result.status == GoalStatus.STATUS_SUCCEEDED
+            and result.result.is_docked
+        ):
+            self.state = 'DOCKED'
+            self.dock_phase = None
+
+            self.get_logger().info('DOCKING -> DOCKED')
+            return
+
+        self.get_logger().error(
+            f'Dock 실패 (status {result.status})'
+        )
+
+        self.dock_failed()
+
+    def dock_failed(self):
+
+        if self.dock_retries < self.dock_max_retries:
+            self.dock_retries += 1
+
+            self.get_logger().warning(
+                f'도크 앞으로 다시 이동 후 재시도 '
+                f'({self.dock_retries}/{self.dock_max_retries})'
+            )
+
+            self.send_dock_staging_goal()
+            return
+
+        self.dock_phase = 'FAILED'
+
+        self.get_logger().error('도킹 실패, 정지한 채 대기')
+
+    # =========================================================
     # 상태 제어
     # =========================================================
     def control_loop(self):
+
+        # -----------------------------------------------------
+        # DOCKING / DOCKED
+        #
+        # Nav2와 Dock 액션이 제어한다. cmd_vel을 보내지 않는다.
+        # -----------------------------------------------------
+        if self.state == 'DOCKING':
+
+            # approach 취소가 끝날 때까지(최대 3초) 기다렸다가 Nav2 goal을 보낸다.
+            # 바로 보내면 approach goal을 선점해 approach가 fallback으로 갈 수 있다.
+            if self.dock_phase == 'WAIT_APPROACH':
+                if (
+                    self.approach_status != ApproachStatus.MOVING
+                    or self.seconds_since(self.dock_start_time) > 3.0
+                ):
+                    self.send_dock_staging_goal()
+
+            return
+
+        if self.state == 'DOCKED':
+            return
 
         # -----------------------------------------------------
         # SEARCHING

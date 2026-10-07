@@ -64,6 +64,28 @@ mission_manager:
     # 이 시간이 지난 뒤 자동차가 보이면 추종, 계속 안 보이면 LOST
     arrival_hold_time: 2.0
 
+    # =====================================================
+    # Battery / Docking
+    # =====================================================
+
+    battery_topic: "/robot2/battery_state"
+    dock_status_topic: "/robot2/dock_status"
+
+    # 배터리 잔량(0~1)이 이 값 미만이면 미션을 멈추고 도킹하러 간다
+    battery_low_threshold: 0.2
+
+    nav_action: "/robot2/navigate_to_pose"
+    dock_action: "/robot2/dock"
+
+    # 도크 앞 대기 자세 (map) [m, m, rad]
+    # 도크 정면 약 0.5~1m, 도크를 바라보는 방향으로 맞춘다
+    dock_staging_x: 0.0
+    dock_staging_y: 0.0
+    dock_staging_yaw: 0.0
+
+    # Dock 액션 실패 시 도크 앞 이동부터 다시 시도하는 횟수
+    dock_max_retries: 2
+
 
 approach:
   ros__parameters:
