@@ -55,7 +55,7 @@ mission_manager:
     # LOST 상태에서 자동차를 다시 찾을 때 제자리 회전 속도 [rad/s]
     # 마지막으로 본 쪽으로 돈다. 본 적이 없으면 부호대로 돈다.
     # 양수: 반시계(좌회전), 음수: 시계(우회전)
-    lost_angular_speed: 0.3
+    lost_angular_speed: 0.03
 
     # approach 도착(yaw 정렬 완료) 후 정지한 채 자동차를 감지하며 기다리는 시간 [s]
     # 이 시간이 지난 뒤 자동차가 보이면 추종, 계속 안 보이면 LOST

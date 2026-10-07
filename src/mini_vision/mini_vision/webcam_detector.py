@@ -33,7 +33,7 @@ class WebcamDetector(Node):
             'device': 'cpu',
             'image_width': 640,
             'image_height': 480,
-            'rate_hz': 10.0,
+            'rate_hz': 5.0,
             'show_window': True,
             'frame_id': 'webcam_optical_frame',
         }

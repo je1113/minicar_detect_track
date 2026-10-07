@@ -127,7 +127,7 @@ class MissionManager(Node):
         # 양수: 반시계(좌회전), 음수: 시계(우회전)
         self.declare_parameter(
             'lost_angular_speed',
-            0.3
+            0.03
         )
 
         # approach가 도착(yaw 정렬까지 완료)한 뒤 정지한 채
