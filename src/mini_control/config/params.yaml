@@ -81,3 +81,27 @@ approach:
     #
     view_offset_x: 0.6755
     view_offset_y: 0.8150
+    # =====================================================
+    # Nav2 실패 시 cmd_vel fallback
+    #
+    # Nav2 가 실패하면 아래 경로점을 거쳐 goal 까지
+    # 제자리 회전 → 직진을 반복해 이동한다.
+    #   (0,0) → (2,0) 좌회전 → (1.79,1.77) 좌회전 → goal
+    # =====================================================
+
+    fallback_enabled: true
+
+    cmd_vel_topic: "/robot2/cmd_vel"
+    odom_topic: "/robot2/odom"
+
+    # 경로 시작점 + goal 전에 거칠 경로점 [x0, y0, x1, y1, ...] (map) [m]
+    # 로봇에서 가장 가까운 구간의 끝점부터 이어서 간다.
+    fallback_waypoints: [0.0, 0.0, 2.0, 0.0, 1.79, 1.77]
+
+    fallback_linear_speed: 0.15       # [m/s]
+    fallback_angular_speed: 0.6       # [rad/s]
+    fallback_position_tolerance: 0.08 # 경로점 도착 판정 [m]
+    fallback_yaw_tolerance: 0.05      # 회전 완료 판정 [rad]
+    fallback_heading_tolerance: 0.4   # 직진 중 이보다 틀어지면 다시 제자리 회전 [rad]
+    fallback_odom_timeout: 1.0        # [s]
+    fallback_timeout: 90.0            # [s]
