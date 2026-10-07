@@ -15,7 +15,7 @@ approach 연결:
 추종 방식(follow_mode 파라미터):
   cmd_vel (기본)  AMR 카메라 감지로 속도를 계산해 cmd_vel 로 직접 보낸다.
   nav             AMR 카메라 감지를 map 좌표로 바꿔 approach 목표 토픽으로 보내고
-                  Nav2 가 따라가게 한다. 이때 cmd_vel 은 보내지 않고,
+                  Nav2 가 따라가게 한다. 이때 추종 중에는 cmd_vel 을 보내지 않고,
                   추종을 멈출 때는 approach 취소 토픽을 쓴다.
 """
 
@@ -65,6 +65,7 @@ class MissionManager(Node):
         # =====================================================
         # 1. ROS2 파라미터 선언
         # =====================================================
+
         self.declare_parameter(
             'target_position_topic',
             '/target/map_position'
@@ -140,9 +141,25 @@ class MissionManager(Node):
             0.5
         )
 
+        # 자동차가 이 시간 동안 한 번도 감지되지 않아야 LOST로 간다 [s]
         self.declare_parameter(
-            'handover_detection_count',
-            3
+            'lost_timeout',
+            2.0
+        )
+
+        # LOST 상태에서 자동차를 다시 찾을 때 제자리 회전 속도 [rad/s]
+        # 마지막으로 본 쪽으로 돈다. 본 적이 없으면 부호대로 돈다.
+        # 양수: 반시계(좌회전), 음수: 시계(우회전)
+        self.declare_parameter(
+            'lost_angular_speed',
+            0.03
+        )
+
+        # approach가 도착(yaw 정렬까지 완료)한 뒤 정지한 채
+        # 자동차를 감지하며 기다리는 시간 [s]
+        self.declare_parameter(
+            'arrival_hold_time',
+            2.0
         )
 
         # 추종 방식: 'cmd_vel'(속도 직접 제어) 또는 'nav'(Nav2 goal)
@@ -183,6 +200,7 @@ class MissionManager(Node):
         # =====================================================
         # 2. 파라미터 읽기
         # =====================================================
+
         self.target_position_topic = (
             self.get_parameter(
                 'target_position_topic'
@@ -273,9 +291,21 @@ class MissionManager(Node):
             ).value
         )
 
-        self.handover_detection_count = int(
+        self.lost_timeout = float(
             self.get_parameter(
-                'handover_detection_count'
+                'lost_timeout'
+            ).value
+        )
+
+        self.lost_angular_speed = float(
+            self.get_parameter(
+                'lost_angular_speed'
+            ).value
+        )
+
+        self.arrival_hold_time = float(
+            self.get_parameter(
+                'arrival_hold_time'
             ).value
         )
 
@@ -331,11 +361,16 @@ class MissionManager(Node):
         self.target_center_x = None
 
         # amr_detector가 /amr/detections에 넣어 주는 자동차까지 거리 [m]
+        # depth 측정이 한 프레임 실패해도 직전 유효 거리를 잠시 쓴다.
         self.distance = None
+        self.distance_time = None
 
         self.last_detection_time = None
 
-        self.handover_count = 0
+        self.handover_start_time = None
+
+        # HANDOVER 진입 후 추종을 시작하지 않고 정지해 있을 시간 [s]
+        self.handover_hold_time = 0.0
 
         # nav 모드: AMR 감지를 map 좌표로 바꾸는 데 필요한 값
         self.camera_fx = None
@@ -451,26 +486,22 @@ class MissionManager(Node):
             )
             return
 
-        # SEARCHING 상태일 때 자동차 위치를 찾으면 접근 시작
-        if self.state == 'SEARCHING':
-
-            self.approach_target_pub.publish(msg)
-
-            self.state = 'APPROACHING'
-
-            self.get_logger().info(
-                'SEARCHING -> APPROACHING'
-            )
-
+        # 첫 자동차 위치만 approach에 전달
+        if self.state != 'SEARCHING':
             return
 
-        # 취소를 요청한 뒤 새 목표를 보내면 Nav2가 다시 움직이므로 보내지 않는다.
-        if (
-            self.state == 'APPROACHING'
-            and not self.handover_cancel_requested
-        ):
-            # 계속 들어오는 좌표의 goal 교체 여부는 approach가 판단한다.
-            self.approach_target_pub.publish(msg)
+        self.get_logger().info(
+            f'car map position=({msg.point.x:.3f}, '
+            f'{msg.point.y:.3f})'
+        )
+
+        self.approach_target_pub.publish(msg)
+
+        self.state = 'APPROACHING'
+
+        self.get_logger().info(
+            'SEARCHING -> APPROACHING'
+        )
 
     # =========================================================
     # approach 상태 수신
@@ -500,8 +531,11 @@ class MissionManager(Node):
             self.notify_approach_complete()
             return
 
+        # 도착 후 자세가 잡힌 상태에서 잠시 멈춰 감지한다
         if status == ApproachStatus.ARRIVED:
-            self.notify_approach_complete()
+            self.notify_approach_complete(
+                hold_time=self.arrival_hold_time
+            )
             return
 
         self.state = 'SEARCHING'
@@ -526,37 +560,60 @@ class MissionManager(Node):
     # =========================================================
     # 접근 완료 → AMR 카메라 인계
     # =========================================================
-    def notify_approach_complete(self):
+    def notify_approach_complete(self, hold_time=0.0):
 
         if self.state != 'APPROACHING':
             return
 
+        self.start_handover('APPROACHING', hold_time)
+
+    # =========================================================
+    # HANDOVER 진입: 정지 후 hold_time이 지나고 자동차가 보이면 추종한다
+    # =========================================================
+    def start_handover(self, from_state, hold_time=0.0):
+
         self.state = 'HANDOVER'
-        self.handover_count = 0
+        self.handover_start_time = self.get_clock().now()
+        self.handover_hold_time = hold_time
 
         # nav 모드에서는 approach 가 이미 끝났으므로 0 속도를 보내지 않는다.
         if self.follow_mode == FOLLOW_MODE_CMD_VEL:
             self.stop_robot()
 
         self.get_logger().info(
-            'APPROACHING -> HANDOVER'
+            f'{from_state} -> HANDOVER (hold {hold_time:.1f}s)'
         )
 
     # =========================================================
     # AMR 카메라 감지 결과
     # =========================================================
     def amr_detection_callback(self, msg):
+        # car 클래스만 필터링
+        car_detections = []
 
-        # 자동차 감지 실패
-        if len(msg.detections) == 0:
+        for detection in msg.detections:
+            if len(detection.results) == 0:
+                continue
 
+            class_id = detection.results[0].hypothesis.class_id
+
+            if class_id == 'car':
+                car_detections.append(detection)
+
+        # car가 없는 프레임은 감지 실패로만 표시한다.
+        # 한두 프레임 놓친 것으로 상태를 바꾸지 않도록
+        # 마지막 위치/거리는 지우지 않고, LOST 판정은 lost_timeout에 맡긴다.
+        if len(car_detections) == 0:
             self.target_detected = False
-            self.handover_count = 0
-            self.distance = None
-
             return
 
-        detection = msg.detections[0]
+        # car가 여러 개라면 confidence 가장 높은 car 사용
+        detection = max(
+            car_detections,
+            key=lambda d: float(
+                d.results[0].hypothesis.score
+            )
+        )
 
         self.target_detected = True
 
@@ -564,59 +621,81 @@ class MissionManager(Node):
             detection.bbox.center.position.x
         )
 
-        # amr_detector가 넣어 준 거리 [m], 0 이하는 측정 실패
-        distance = 0.0
-        if detection.results:
-            distance = float(
-                detection.results[0].pose.pose.position.z
-            )
-        self.distance = distance if distance > 0.0 else None
+        distance = float(
+            detection.results[0].pose.pose.position.z
+        )
 
         self.last_detection_time = (
             self.get_clock().now()
         )
 
-        # HANDOVER 상태에서 연속 감지 확인
-        if self.state == 'HANDOVER':
+        # 0.0은 depth 측정 실패이므로 직전 유효 거리를 유지한다.
+        if distance > 0.0:
+            self.distance = distance
+            self.distance_time = self.last_detection_time
 
-            self.handover_count += 1
+        score = float(
+            detection.results[0].hypothesis.score
+        )
 
-            if (
-                self.handover_count
-                >= self.handover_detection_count
-            ):
-                # Nav2 접근 제어 취소 요청
-                self.approach_cancel_pub.publish(
-                    Empty()
-                )
+        self.get_logger().info(
+            f'AMR car detected: '
+            f'x={self.target_center_x:.1f}, '
+            f'score={score:.2f}'
+        )
 
-                if self.follow_mode == FOLLOW_MODE_CMD_VEL:
-                    self.stop_robot()
+    # =========================================================
+    # 추종 시작
+    # =========================================================
+    def start_following(self, from_state):
 
-                # 추종 첫 좌표는 바로 보내도록 이전 기록을 지운다.
-                self.last_follow_target = None
-                self.last_follow_time = None
+        if self.follow_mode == FOLLOW_MODE_NAV:
 
-                self.state = 'FOLLOWING'
+            # 추종 첫 좌표는 바로 보내도록 이전 기록을 지운다.
+            self.last_follow_target = None
+            self.last_follow_time = None
 
-                self.get_logger().info(
-                    'HANDOVER -> FOLLOWING'
-                )
+            # LOST 에서 제자리 회전하던 마지막 속도 명령이 남지 않게 한 번 멈춘다.
+            if from_state == 'LOST':
+                self.stop_robot()
+
+        self.state = 'FOLLOWING'
+
+        self.get_logger().info(
+            f'{from_state} -> FOLLOWING'
+        )
 
     # =========================================================
     # 감지 결과가 아직 유효한지 확인
     # =========================================================
-    def detection_is_fresh(self):
+    def seconds_since(self, stamp):
 
-        if self.last_detection_time is None:
-            return False
+        if stamp is None:
+            return float('inf')
 
-        elapsed = (
-            self.get_clock().now()
-            - self.last_detection_time
+        return (
+            self.get_clock().now() - stamp
         ).nanoseconds / 1e9
 
-        return elapsed <= self.detection_timeout
+    def detection_is_fresh(self):
+
+        return (
+            self.seconds_since(self.last_detection_time)
+            <= self.detection_timeout
+        )
+
+    # =========================================================
+    # lost_timeout 동안 자동차를 한 번도 못 봤는지 확인
+    # =========================================================
+    def target_is_lost(self, since=None):
+
+        elapsed = self.seconds_since(self.last_detection_time)
+
+        # HANDOVER는 진입 시각부터 기다린다
+        if since is not None:
+            elapsed = min(elapsed, self.seconds_since(since))
+
+        return elapsed > self.lost_timeout
 
     # =========================================================
     # 상태 제어
@@ -653,8 +732,39 @@ class MissionManager(Node):
         # -----------------------------------------------------
         if self.state == 'HANDOVER':
 
+            # hold_time 동안은 감지만 하고 정지해 있는다
+            holding = (
+                self.seconds_since(self.handover_start_time)
+                < self.handover_hold_time
+            )
+
+            # hold가 끝난 뒤 자동차가 보이면 바로 추종
+            if (
+                not holding
+                and self.target_detected
+                and self.detection_is_fresh()
+            ):
+                self.approach_cancel_pub.publish(
+                    Empty()
+                )
+
+                self.start_following('HANDOVER')
+
+                return
+
             if self.follow_mode == FOLLOW_MODE_CMD_VEL:
                 self.stop_robot()
+
+            if holding:
+                return
+
+            # 멈춘 뒤 lost_timeout 동안 자동차가 안 보이면 다시 회전하며 찾는다
+            if self.target_is_lost(since=self.handover_start_time):
+                self.state = 'LOST'
+
+                self.get_logger().warning(
+                    'HANDOVER -> LOST'
+                )
 
             return
 
@@ -663,11 +773,8 @@ class MissionManager(Node):
         # -----------------------------------------------------
         if self.state == 'FOLLOWING':
 
-            # 자동차 감지 손실
-            if (
-                not self.target_detected
-                or not self.detection_is_fresh()
-            ):
+            # lost_timeout 동안 한 번도 못 봤을 때만 LOST
+            if self.target_is_lost():
                 self.state = 'LOST'
 
                 if self.follow_mode == FOLLOW_MODE_NAV:
@@ -685,19 +792,31 @@ class MissionManager(Node):
             # nav 모드: 속도를 직접 만들지 않고 Nav2 목표를 보낸다.
             if self.follow_mode == FOLLOW_MODE_NAV:
 
-                self.follow_with_nav()
+                # 감지나 거리가 오래됐으면 새 좌표를 만들지 않고
+                # 마지막 목표를 그대로 둔다.
+                if (
+                    self.detection_is_fresh()
+                    and self.seconds_since(self.distance_time)
+                    <= self.detection_timeout
+                ):
+                    self.follow_with_nav()
 
                 return
 
-            # 거리 측정에 실패했으면 정지
-            if self.distance is None:
+            # 잠깐 놓쳤거나 거리가 오래되면 멈춰서 다시 보일 때까지 기다린다
+            if (
+                not self.detection_is_fresh()
+                or self.seconds_since(self.distance_time)
+                > self.detection_timeout
+            ):
 
                 self.stop_robot()
 
                 return
 
+            # 직전 감지(detection_timeout 이내)로 계속 추종한다
             linear_x, angular_z = compute_velocity(
-                target_detected=self.target_detected,
+                target_detected=True,
                 target_center_x=self.target_center_x,
                 image_width=self.image_width,
                 distance=self.distance,
@@ -721,20 +840,20 @@ class MissionManager(Node):
         # -----------------------------------------------------
         if self.state == 'LOST':
 
-            # nav 모드는 FOLLOWING -> LOST 로 넘어갈 때 이미 취소했다.
-            if self.follow_mode == FOLLOW_MODE_CMD_VEL:
-                self.stop_robot()
-
-            # 다시 AMR 카메라에서 자동차를 찾음
+            # 자동차가 한 번이라도 보이면 바로 추종
             if (
                 self.target_detected
                 and self.detection_is_fresh()
             ):
-                self.state = 'FOLLOWING'
+                self.start_following('LOST')
 
-                self.get_logger().info(
-                    'LOST -> FOLLOWING'
-                )
+                return
+
+            # 찾을 때까지 마지막으로 본 쪽으로 제자리 회전
+            self.publish_velocity(
+                0.0,
+                self.lost_search_angular_speed()
+            )
 
             return
 
@@ -856,6 +975,21 @@ class MissionManager(Node):
         self.get_logger().info(
             '추종 중단, approach 취소 요청'
         )
+
+    # =========================================================
+    # LOST 회전 방향: 화면 왼쪽에서 사라졌으면 좌회전, 오른쪽이면 우회전
+    # =========================================================
+    def lost_search_angular_speed(self):
+
+        if self.target_center_x is None:
+            return self.lost_angular_speed
+
+        speed = abs(self.lost_angular_speed)
+
+        if self.target_center_x < self.image_width / 2.0:
+            return speed
+
+        return -speed
 
     # =========================================================
     # 속도 명령 발행

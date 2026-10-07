@@ -1,7 +1,7 @@
 # 이 파일의 0은 자리 표시자다. 실제 측정 전 calibrated를 true로 바꾸지 않는다.
 webcam_localizer:
   ros__parameters:
-    calibrated: false
+    calibrated: true
     map_frame: "map"
     calibration_width: 640
     calibration_height: 480
@@ -9,10 +9,20 @@ webcam_localizer:
 
     # 바닥 사각형 경계를 따라 네 점을 시계/반시계 방향으로 기록한다.
     # 픽셀 좌표: [u1,v1, u2,v2, u3,v3, u4,v4]
-    pixel_points: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    # 위와 정확히 같은 순서의 map 좌표, 단위 m: [x1,y1, ...]
-    map_points: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-
+    pixel_points:
+      [
+        179.5, 196.8,   # ID 0
+        440.9, 207.3,   # ID 1
+        456.8, 428.2,   # ID 2
+        156.5, 422.3    # ID 3
+      ]    # 위와 정확히 같은 순서의 map 좌표, 단위 m: [x1,y1, ...]
+    map_points:
+      [
+        -0.1733412, 1.1492062,   # ID 0 top-left
+        0.1156473, 1.2147021,   # ID 1 top-right
+        0.0328324, 0.8851930,   # ID 2 bottom-right
+        -0.1551041, 0.8911393    # ID 3 bottom-left
+      ]
     # 렌즈 왜곡 보정값이 있다면 사용한다. 미사용 때 왜곡 오차가 남는다.
     undistort: false
     camera_matrix: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]

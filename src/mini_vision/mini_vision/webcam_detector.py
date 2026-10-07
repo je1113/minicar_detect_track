@@ -30,10 +30,10 @@ class WebcamDetector(Node):
             'model_path': default_model_path,
             'target_classes': ['car', 'dummy'],
             'confidence': 0.8,  # 사용자가 설정한 값. 실제 탐지 결과에 맞춰 조정한다.
-            'device': 'cpu',
+            'device': 'cuda:0',
             'image_width': 640,
             'image_height': 480,
-            'rate_hz': 10.0,
+            'rate_hz': 5.0,
             'show_window': True,
             'frame_id': 'webcam_optical_frame',
         }
@@ -85,7 +85,7 @@ class WebcamDetector(Node):
         self.create_timer(1.0 / self.p['rate_hz'], self.tick)
 
     def tick(self):
-        # 프레임을 읽은 시점의 시간을 이미지와 감지 메시지에 함께 넣는다.
+        # 프레임을 읽은 직후의 시간을 이미지와 감지 메시지에 동일하게 사용한다.
         ok, frame = self.camera.read()
         header = Header()
         header.stamp = self.get_clock().now().to_msg()

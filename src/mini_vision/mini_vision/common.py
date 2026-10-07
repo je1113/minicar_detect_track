@@ -11,17 +11,17 @@ from vision_msgs.msg import (
 )
 
 
-def detect(model, frame, header, target_class, confidence, device):
+def detect(model, frame, header, target_classes, confidence, device):
     """요청한 클래스마다 신뢰도가 가장 높은 객체 1개씩 반환한다.
 
     target_class='car': car 최대 1개.
     target_class=['car', 'dummy']: car 최대 1개, dummy 최대 1개.
     기존 AMR 코드와의 호환을 위해 인자 이름 target_class를 유지한다.
     """
-    if isinstance(target_class, str):
-        target_classes = [target_class]
+    if isinstance(target_classes, str):
+        target_classes = [target_classes]
     else:
-        target_classes = list(target_class)
+        target_classes = list(target_classes)
     target_classes = list(dict.fromkeys(target_classes))
 
     result = model.predict(
