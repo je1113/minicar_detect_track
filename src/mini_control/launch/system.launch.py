@@ -132,6 +132,12 @@ def generate_launch_description():
         default_value='3'
     )
 
+    # cmd_vel: 속도 직접 제어 (기존), nav: Nav2 goal 로 추종
+    follow_mode_arg = DeclareLaunchArgument(
+        'follow_mode',
+        default_value='cmd_vel'
+    )
+
     # =========================================================
     # 4. 고정 웹캠 YOLO 감지
     # =========================================================
@@ -258,6 +264,10 @@ def generate_launch_description():
                     ),
                     value_type=int
                 ),
+
+                'follow_mode': LaunchConfiguration(
+                    'follow_mode'
+                ),
             }
         ]
     )
@@ -280,6 +290,7 @@ def generate_launch_description():
         max_angular_speed_arg,
         detection_timeout_arg,
         handover_detection_count_arg,
+        follow_mode_arg,
 
         webcam_detector_node,
         webcam_localizer_node,

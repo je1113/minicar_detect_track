@@ -6,6 +6,8 @@
 계산 결과를 mission_manager에 반환한다.
 """
 
+import math
+
 from geometry_msgs.msg import TwistStamped
 
 
@@ -155,3 +157,81 @@ def make_cmd_vel_message(
     msg.twist.angular.z = float(angular_z)
 
     return msg
+
+
+def detection_to_map_point(
+    center_x,
+    distance,
+    fx,
+    cx,
+    robot_x,
+    robot_y,
+    robot_yaw,
+):
+    """
+    AMR 카메라 감지(박스 중심 픽셀 x, 거리)를 map 좌표로 바꾼다.
+
+    3_3_d_depth_to_nav_goal_ts 와 같은 핀홀 역투영을 쓴다.
+        X = (u - cx) * Z / fx    카메라 오른쪽이 +
+        Z = distance             카메라 앞쪽이 +
+    세로(Y)는 지도에 쓰지 않는다.
+
+    카메라 좌표를 로봇 기준(앞쪽 f = Z, 왼쪽 l = -X)으로 보고,
+    amcl_pose 의 위치와 방향으로 map 에 옮긴다.
+        map_x = robot_x + f * cos(yaw) - l * sin(yaw)
+        map_y = robot_y + f * sin(yaw) + l * cos(yaw)
+
+    카메라가 로봇 중심에서 떨어진 오프셋은 무시한다.
+
+    반환값:
+        (map_x, map_y) [m]
+    """
+    if fx <= 0.0:
+        raise ValueError(f'fx 는 0보다 커야 합니다: {fx}')
+
+    lateral_x = (center_x - cx) * distance / fx
+
+    forward = distance
+    left = -lateral_x
+
+    cos_yaw = math.cos(robot_yaw)
+    sin_yaw = math.sin(robot_yaw)
+
+    return (
+        robot_x + forward * cos_yaw - left * sin_yaw,
+        robot_y + forward * sin_yaw + left * cos_yaw,
+    )
+
+
+def should_publish_follow_target(
+    last_point,
+    new_point,
+    elapsed,
+    min_period,
+    min_move,
+    refresh_period,
+):
+    """
+    FOLLOWING 중 새 자동차 좌표를 approach 로 보낼지 정한다.
+
+    approach 는 좌표를 받을 때마다 Nav2 goal 을 보낼 수 있다.
+    goal 이 자주 바뀌면 로봇이 끊기므로 보내는 쪽에서도 횟수를 줄인다.
+        - 처음이면 보낸다.
+        - 마지막으로 보낸 뒤 min_period 가 지나지 않았으면 보내지 않는다.
+        - 자동차가 min_move 이상 움직였거나 refresh_period 가 지났으면 보낸다.
+          (움직이지 않아도 가끔 다시 보내 goal 이 실패했을 때 재시도한다.)
+
+    last_point, new_point 는 (x, y), elapsed 는 마지막으로 보낸 뒤 경과 시간 [s].
+    """
+    if last_point is None:
+        return True
+
+    if elapsed < min_period:
+        return False
+
+    moved = math.hypot(
+        new_point[0] - last_point[0],
+        new_point[1] - last_point[1],
+    )
+
+    return moved >= min_move or elapsed >= refresh_period

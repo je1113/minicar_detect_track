@@ -11,17 +11,43 @@ LOST
 approach 연결:
   웹캠 좌표를 approach 목표 토픽으로 넘기고,
   approach 상태(ARRIVED/FAILED/CANCELED)로 다음 상태를 정한다.
+
+추종 방식(follow_mode 파라미터):
+  cmd_vel (기본)  AMR 카메라 감지로 속도를 계산해 cmd_vel 로 직접 보낸다.
+  nav             AMR 카메라 감지를 map 좌표로 바꿔 approach 목표 토픽으로 보내고
+                  Nav2 가 따라가게 한다. 이때 cmd_vel 은 보내지 않고,
+                  추종을 멈출 때는 approach 취소 토픽을 쓴다.
 """
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 
-from geometry_msgs.msg import PointStamped, TwistStamped
+from geometry_msgs.msg import (
+    PointStamped,
+    PoseWithCovarianceStamped,
+    TwistStamped,
+)
+from sensor_msgs.msg import CameraInfo
 from std_msgs.msg import Empty, String
 from vision_msgs.msg import Detection2DArray
 
-from .approach import ApproachStatus
-from .follow import compute_velocity, stop_velocity
+from .approach import (
+    ApproachStatus,
+    LATCHED_QOS,
+    quaternion_to_yaw,
+    QuaternionXYZW,
+)
+from .follow import (
+    compute_velocity,
+    detection_to_map_point,
+    should_publish_follow_target,
+    stop_velocity,
+)
+
+FOLLOW_MODE_CMD_VEL = 'cmd_vel'
+FOLLOW_MODE_NAV = 'nav'
+FOLLOW_MODES = (FOLLOW_MODE_CMD_VEL, FOLLOW_MODE_NAV)
 
 # approach가 이동을 끝냈음을 뜻하는 상태
 APPROACH_FINISHED = (
@@ -117,6 +143,41 @@ class MissionManager(Node):
         self.declare_parameter(
             'handover_detection_count',
             3
+        )
+
+        # 추종 방식: 'cmd_vel'(속도 직접 제어) 또는 'nav'(Nav2 goal)
+        self.declare_parameter(
+            'follow_mode',
+            FOLLOW_MODE_CMD_VEL
+        )
+
+        # nav 모드에서 AMR 감지를 map 좌표로 바꿀 때 쓴다.
+        self.declare_parameter(
+            'camera_info_topic',
+            '/robot2/oakd/rgb/camera_info'
+        )
+
+        self.declare_parameter(
+            'robot_pose_topic',
+            '/robot2/amcl_pose'
+        )
+
+        # nav 모드에서 자동차 좌표를 approach 로 보내는 최소 간격 [s]
+        self.declare_parameter(
+            'follow_publish_period',
+            0.5
+        )
+
+        # 마지막으로 보낸 좌표에서 이만큼 움직여야 다시 보낸다 [m]
+        self.declare_parameter(
+            'follow_min_move',
+            0.2
+        )
+
+        # 움직이지 않아도 이 시간마다 다시 보낸다 [s]
+        self.declare_parameter(
+            'follow_refresh_period',
+            3.0
         )
 
         # =====================================================
@@ -218,6 +279,49 @@ class MissionManager(Node):
             ).value
         )
 
+        self.follow_mode = str(
+            self.get_parameter(
+                'follow_mode'
+            ).value
+        )
+
+        # 오타가 나면 조용히 다른 방식으로 움직이지 않도록 시작할 때 막는다.
+        if self.follow_mode not in FOLLOW_MODES:
+            raise ValueError(
+                f'follow_mode 는 {FOLLOW_MODES} 중 하나여야 합니다: '
+                f'{self.follow_mode!r}'
+            )
+
+        self.camera_info_topic = (
+            self.get_parameter(
+                'camera_info_topic'
+            ).value
+        )
+
+        self.robot_pose_topic = (
+            self.get_parameter(
+                'robot_pose_topic'
+            ).value
+        )
+
+        self.follow_publish_period = float(
+            self.get_parameter(
+                'follow_publish_period'
+            ).value
+        )
+
+        self.follow_min_move = float(
+            self.get_parameter(
+                'follow_min_move'
+            ).value
+        )
+
+        self.follow_refresh_period = float(
+            self.get_parameter(
+                'follow_refresh_period'
+            ).value
+        )
+
         # =====================================================
         # 3. 상태값
         # =====================================================
@@ -232,6 +336,17 @@ class MissionManager(Node):
         self.last_detection_time = None
 
         self.handover_count = 0
+
+        # nav 모드: AMR 감지를 map 좌표로 바꾸는 데 필요한 값
+        self.camera_fx = None
+        self.camera_cx = None
+
+        # amcl_pose 로 받은 로봇 map 위치 (x, y, yaw)
+        self.robot_pose = None
+
+        # nav 모드: 마지막으로 approach 에 보낸 자동차 좌표 (x, y)와 시각
+        self.last_follow_target = None
+        self.last_follow_time = None
 
         # =====================================================
         # 4. approach 상태
@@ -293,6 +408,25 @@ class MissionManager(Node):
             self.amr_detection_callback,
             10
         )
+
+        # nav 모드에서만 필요하다. cmd_vel 모드는 기존과 구독이 같다.
+        if self.follow_mode == FOLLOW_MODE_NAV:
+
+            # 카메라 내부 파라미터(fx, cx)
+            self.create_subscription(
+                CameraInfo,
+                self.camera_info_topic,
+                self.camera_info_callback,
+                qos_profile_sensor_data
+            )
+
+            # approach 와 같이 amcl_pose 로 로봇의 map 위치를 얻는다.
+            self.create_subscription(
+                PoseWithCovarianceStamped,
+                self.robot_pose_topic,
+                self.robot_pose_callback,
+                LATCHED_QOS
+            )
 
         # =====================================================
         # 8. 제어 Timer
@@ -400,7 +534,9 @@ class MissionManager(Node):
         self.state = 'HANDOVER'
         self.handover_count = 0
 
-        self.stop_robot()
+        # nav 모드에서는 approach 가 이미 끝났으므로 0 속도를 보내지 않는다.
+        if self.follow_mode == FOLLOW_MODE_CMD_VEL:
+            self.stop_robot()
 
         self.get_logger().info(
             'APPROACHING -> HANDOVER'
@@ -454,7 +590,12 @@ class MissionManager(Node):
                     Empty()
                 )
 
-                self.stop_robot()
+                if self.follow_mode == FOLLOW_MODE_CMD_VEL:
+                    self.stop_robot()
+
+                # 추종 첫 좌표는 바로 보내도록 이전 기록을 지운다.
+                self.last_follow_target = None
+                self.last_follow_time = None
 
                 self.state = 'FOLLOWING'
 
@@ -512,7 +653,8 @@ class MissionManager(Node):
         # -----------------------------------------------------
         if self.state == 'HANDOVER':
 
-            self.stop_robot()
+            if self.follow_mode == FOLLOW_MODE_CMD_VEL:
+                self.stop_robot()
 
             return
 
@@ -528,11 +670,22 @@ class MissionManager(Node):
             ):
                 self.state = 'LOST'
 
-                self.stop_robot()
+                if self.follow_mode == FOLLOW_MODE_NAV:
+                    # Nav2 가 마지막 목표로 계속 가지 않게 한 번만 취소한다.
+                    self.cancel_follow_goal()
+                else:
+                    self.stop_robot()
 
                 self.get_logger().warning(
                     'FOLLOWING -> LOST'
                 )
+
+                return
+
+            # nav 모드: 속도를 직접 만들지 않고 Nav2 목표를 보낸다.
+            if self.follow_mode == FOLLOW_MODE_NAV:
+
+                self.follow_with_nav()
 
                 return
 
@@ -568,7 +721,9 @@ class MissionManager(Node):
         # -----------------------------------------------------
         if self.state == 'LOST':
 
-            self.stop_robot()
+            # nav 모드는 FOLLOWING -> LOST 로 넘어갈 때 이미 취소했다.
+            if self.follow_mode == FOLLOW_MODE_CMD_VEL:
+                self.stop_robot()
 
             # 다시 AMR 카메라에서 자동차를 찾음
             if (
@@ -582,6 +737,125 @@ class MissionManager(Node):
                 )
 
             return
+
+    # =========================================================
+    # nav 모드: 카메라 내부 파라미터 / 로봇 위치 수신
+    # =========================================================
+    def camera_info_callback(self, msg):
+
+        fx = float(msg.k[0])
+        cx = float(msg.k[2])
+
+        if fx <= 0.0:
+            self.get_logger().warning(
+                f'camera_info 의 fx 가 올바르지 않습니다: {fx}',
+                throttle_duration_sec=5.0
+            )
+            return
+
+        first = self.camera_fx is None
+
+        self.camera_fx = fx
+        self.camera_cx = cx
+
+        if first:
+            self.get_logger().info(
+                f'camera_info 수신: fx={fx:.1f}, cx={cx:.1f}, '
+                f'{msg.width}x{msg.height}'
+            )
+
+    def robot_pose_callback(self, msg):
+
+        pose = msg.pose.pose
+        q = pose.orientation
+
+        self.robot_pose = (
+            pose.position.x,
+            pose.position.y,
+            quaternion_to_yaw(
+                QuaternionXYZW(q.x, q.y, q.z, q.w)
+            ),
+        )
+
+    # =========================================================
+    # nav 모드: 감지된 자동차를 Nav2 목표로 보냄
+    # =========================================================
+    def follow_with_nav(self):
+
+        # 거리를 못 쟀으면 새 좌표를 만들 수 없다. 마지막 목표는 그대로 둔다.
+        if self.distance is None:
+            return
+
+        if self.camera_fx is None or self.robot_pose is None:
+            self.get_logger().warning(
+                'camera_info / amcl_pose 수신 대기 중',
+                throttle_duration_sec=2.0
+            )
+            return
+
+        robot_x, robot_y, robot_yaw = self.robot_pose
+
+        car = detection_to_map_point(
+            self.target_center_x,
+            self.distance,
+            self.camera_fx,
+            self.camera_cx,
+            robot_x,
+            robot_y,
+            robot_yaw,
+        )
+
+        now = self.get_clock().now()
+
+        elapsed = None
+        if self.last_follow_time is not None:
+            elapsed = (
+                now - self.last_follow_time
+            ).nanoseconds / 1e9
+
+        if not should_publish_follow_target(
+            self.last_follow_target,
+            car,
+            elapsed,
+            self.follow_publish_period,
+            self.follow_min_move,
+            self.follow_refresh_period,
+        ):
+            return
+
+        msg = PointStamped()
+
+        msg.header.stamp = now.to_msg()
+        msg.header.frame_id = self.map_frame
+
+        msg.point.x = float(car[0])
+        msg.point.y = float(car[1])
+        msg.point.z = 0.0
+
+        # goal 교체 여부와 stand-off 위치는 approach 가 정한다.
+        self.approach_target_pub.publish(msg)
+
+        self.last_follow_target = car
+        self.last_follow_time = now
+
+        self.get_logger().info(
+            f'follow car map position=({car[0]:.3f}, {car[1]:.3f}) '
+            f'(distance={self.distance:.2f} m)'
+        )
+
+    # =========================================================
+    # nav 모드: 추종 goal 취소
+    # =========================================================
+    def cancel_follow_goal(self):
+
+        self.last_follow_target = None
+        self.last_follow_time = None
+
+        self.approach_cancel_pub.publish(Empty())
+
+        self.get_logger().info(
+            '추종 중단, approach 취소 요청'
+        )
 
     # =========================================================
     # 속도 명령 발행
@@ -636,6 +910,10 @@ def main(args=None):
         pass
 
     finally:
+
+        # nav 모드에서는 Nav2 가 마지막 목표로 계속 가지 않게 취소한다.
+        if node.follow_mode == FOLLOW_MODE_NAV:
+            node.approach_cancel_pub.publish(Empty())
 
         node.stop_robot()
 
