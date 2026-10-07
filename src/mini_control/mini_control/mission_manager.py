@@ -184,6 +184,20 @@ class MissionManager(Node):
             '/robot2/amcl_pose'
         )
 
+        # nav 모드: 자동차가 안 보여도(LOST) 마지막으로 보낸 Nav2 목표를
+        # 취소하지 않고 끝까지 간다. False 면 LOST 가 될 때 목표를 취소한다.
+        self.declare_parameter(
+            'lost_keep_goal',
+            True
+        )
+
+        # nav 모드: LOST 에서 Nav2 목표를 유지하는 최대 시간 [s]
+        # 이 시간이 지나도 끝나지 않으면 목표를 취소하고 제자리 회전으로 찾는다.
+        self.declare_parameter(
+            'lost_goal_max_time',
+            20.0
+        )
+
         # 시간이 원인인지 확인하려고 추가했다: nav 모드에서 추종 목표를 보낼 때마다
         # 시각 정보를 CSV 로 저장하는 폴더, 빈 문자열이면 저장 안 함
         self.declare_parameter(
@@ -346,6 +360,18 @@ class MissionManager(Node):
             ).value
         )
 
+        self.lost_keep_goal = bool(
+            self.get_parameter(
+                'lost_keep_goal'
+            ).value
+        )
+
+        self.lost_goal_max_time = float(
+            self.get_parameter(
+                'lost_goal_max_time'
+            ).value
+        )
+
         self.time_log_dir = str(
             self.get_parameter(
                 'time_log_dir'
@@ -400,6 +426,10 @@ class MissionManager(Node):
         # 시간이 원인인지 확인하려고 추가했다: 각 입력의 header 시각
         self.last_detection_stamp = None
         self.robot_pose_stamp = None
+
+        # nav 모드: LOST 로 가면서 Nav2 목표를 유지하기 시작한 시각.
+        # None 이면 유지 중인 목표가 없다.
+        self.lost_goal_since = None
 
         self.time_csv = None
         self.time_csv_writer = None
@@ -685,8 +715,14 @@ class MissionManager(Node):
             self.last_follow_target = None
             self.last_follow_time = None
 
+            # 유지하던 Nav2 목표가 있었으면 Nav2 가 주행 중이므로 0 속도를 보내지 않는다.
+            keeping_goal = self.lost_goal_since is not None
+
+            # 다시 보이면 유지하던 목표 대신 새 좌표를 보낸다.
+            self.lost_goal_since = None
+
             # LOST 에서 제자리 회전하던 마지막 속도 명령이 남지 않게 한 번 멈춘다.
-            if from_state == 'LOST':
+            if from_state == 'LOST' and not keeping_goal:
                 self.stop_robot()
 
         self.state = 'FOLLOWING'
@@ -808,6 +844,18 @@ class MissionManager(Node):
                 self.state = 'LOST'
 
                 if self.follow_mode == FOLLOW_MODE_NAV:
+
+                    if self.should_keep_nav_goal():
+                        # 안 보여도 마지막 목표까지 간다. 취소하지 않는다.
+                        self.lost_goal_since = self.get_clock().now()
+
+                        self.get_logger().warning(
+                            'FOLLOWING -> LOST '
+                            f'(Nav2 목표 유지, 최대 {self.lost_goal_max_time:.0f}s)'
+                        )
+
+                        return
+
                     # Nav2 가 마지막 목표로 계속 가지 않게 한 번만 취소한다.
                     self.cancel_follow_goal()
                 else:
@@ -878,6 +926,24 @@ class MissionManager(Node):
                 self.start_following('LOST')
 
                 return
+
+            # nav 모드: 유지 중인 Nav2 목표가 끝날 때까지 기다린다.
+            # Nav2 가 주행하는 동안 cmd_vel 을 같이 보내면 명령이 부딪힌다.
+            if self.lost_goal_since is not None:
+
+                if self.nav_goal_in_progress():
+                    return
+
+                self.lost_goal_since = None
+
+                status = getattr(
+                    self.approach_status, 'value', self.approach_status
+                )
+
+                self.get_logger().info(
+                    f'LOST: Nav2 목표 종료 (approach {status}), '
+                    '제자리 회전으로 찾는다'
+                )
 
             # 찾을 때까지 마지막으로 본 쪽으로 제자리 회전
             self.publish_velocity(
@@ -1119,6 +1185,43 @@ class MissionManager(Node):
             self.time_csv = None
 
         return super().destroy_node()
+
+    # =========================================================
+    # nav 모드: LOST 로 가도 Nav2 목표를 유지할지
+    #
+    # 옵션이 켜져 있고, 추종 목표를 한 번 이상 보냈고,
+    # approach 가 아직 이동 중일 때만 유지한다.
+    # =========================================================
+    def should_keep_nav_goal(self):
+
+        return (
+            self.lost_keep_goal
+            and self.last_follow_target is not None
+            and self.approach_status == ApproachStatus.MOVING
+        )
+
+    # =========================================================
+    # nav 모드: 유지 중인 Nav2 목표가 아직 진행 중인지
+    #
+    # approach 가 이동을 끝냈으면 False.
+    # 끝나지 않아도 lost_goal_max_time 이 지나면 목표를 취소하고 False.
+    # =========================================================
+    def nav_goal_in_progress(self):
+
+        if self.approach_status != ApproachStatus.MOVING:
+            return False
+
+        if self.seconds_since(self.lost_goal_since) > self.lost_goal_max_time:
+            self.get_logger().warning(
+                f'LOST: Nav2 목표가 {self.lost_goal_max_time:.0f}s 안에 '
+                '끝나지 않아 취소한다'
+            )
+
+            self.cancel_follow_goal()
+
+            return False
+
+        return True
 
     # =========================================================
     # nav 모드: 추종 goal 취소
