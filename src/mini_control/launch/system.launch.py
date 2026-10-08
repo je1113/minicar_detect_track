@@ -23,7 +23,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -147,29 +147,15 @@ def generate_launch_description():
         default_value='/robot2/cmd_vel'
     )
 
-    target_distance_arg = DeclareLaunchArgument(
-        'target_distance',
-        default_value='0.8'
-    )
-
-    min_distance_arg = DeclareLaunchArgument(
-        'min_distance',
-        default_value='0.5'
-    )
-
-    linear_gain_arg = DeclareLaunchArgument(
-        'linear_gain',
-        default_value='0.5'
+    # 경로상 자동차까지 이 거리가 남으면 Nav2 goal 취소 [m]
+    standoff_distance_arg = DeclareLaunchArgument(
+        'standoff_distance',
+        default_value='1.0'
     )
 
     angular_gain_arg = DeclareLaunchArgument(
         'angular_gain',
-        default_value='1.0'
-    )
-
-    max_linear_speed_arg = DeclareLaunchArgument(
-        'max_linear_speed',
-        default_value='0.31'
+        default_value='1.2'
     )
 
     max_angular_speed_arg = DeclareLaunchArgument(
@@ -182,11 +168,18 @@ def generate_launch_description():
         default_value='0.5'
     )
 
+    # TurtleBot4 TF 는 <namespace>/tf 로 나온다.
+    # approach / mission_manager 가 TF(map->base_link, 카메라->map)를 쓰도록 리매핑한다.
+    tf_remappings = [
+        ('/tf', PathJoinSubstitution([LaunchConfiguration('namespace'), 'tf'])),
+        ('/tf_static', PathJoinSubstitution([LaunchConfiguration('namespace'), 'tf_static'])),
+    ]
+
     # =========================================================
     # 4. TurtleBot4 위치 추정 / Nav2 / RViz
     #
     # RViz의 "2D Pose Estimate"로 초기 위치를 지정해야
-    # amcl_pose가 나오고 approach가 goal을 보낼 수 있다.
+    # map->base_link TF가 나오고 approach가 goal을 보낼 수 있다.
     # =========================================================
     localization_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -306,8 +299,15 @@ def generate_launch_description():
         name='approach',
         output='screen',
         parameters=[
-            control_params_file
-        ]
+            control_params_file,
+            {
+                'standoff_distance': ParameterValue(
+                    LaunchConfiguration('standoff_distance'),
+                    value_type=float
+                ),
+            }
+        ],
+        remappings=tf_remappings
     )
 
     # =========================================================
@@ -325,28 +325,8 @@ def generate_launch_description():
                     'cmd_vel_topic'
                 ),
 
-                'target_distance': ParameterValue(
-                    LaunchConfiguration('target_distance'),
-                    value_type=float
-                ),
-
-                'min_distance': ParameterValue(
-                    LaunchConfiguration('min_distance'),
-                    value_type=float
-                ),
-
-                'linear_gain': ParameterValue(
-                    LaunchConfiguration('linear_gain'),
-                    value_type=float
-                ),
-
                 'angular_gain': ParameterValue(
                     LaunchConfiguration('angular_gain'),
-                    value_type=float
-                ),
-
-                'max_linear_speed': ParameterValue(
-                    LaunchConfiguration('max_linear_speed'),
                     value_type=float
                 ),
 
@@ -360,7 +340,8 @@ def generate_launch_description():
                     value_type=float
                 ),
             }
-        ]
+        ],
+        remappings=tf_remappings
     )
 
     # =========================================================
@@ -380,11 +361,8 @@ def generate_launch_description():
         amr_camera_topic_arg,
         cmd_vel_topic_arg,
 
-        target_distance_arg,
-        min_distance_arg,
-        linear_gain_arg,
+        standoff_distance_arg,
         angular_gain_arg,
-        max_linear_speed_arg,
         max_angular_speed_arg,
         detection_timeout_arg,
 

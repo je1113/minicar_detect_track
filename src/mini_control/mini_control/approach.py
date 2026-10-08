@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
 """
-자동차 근처로 Nav2 goal 을 보내 이동하고 취소 요청을 처리하는 노드.
+자동차 위치로 Nav2 goal 을 보내 standoff 거리까지 접근하고 취소 요청을 처리하는 노드.
 
 토픽 이름, 메시지 타입, 상태 문자열은 mission_manager / localizer 와의 팀 인터페이스다.
   target_topic  geometry_msgs/PointStamped (frame=map) : 자동차의 지도 좌표
   cancel_topic  std_msgs/Empty                         : 이동 취소 요청
   status_topic  std_msgs/String (transient local)      : IDLE/MOVING/ARRIVED/FAILED/CANCELED
 
-목표 좌표를 계산했다고 도달이 보장되지는 않으므로, 최종 상태는 Nav2 결과로 정한다.
-Nav2 가 실패하면(서버 없음/거절/abort) fallback_waypoints 를 거쳐 goal 까지
+goal 은 자동차 위치 자체로 보내고, Nav2 feedback 의 distance_remaining(경로상 남은 길이)이
+standoff_distance 아래로 내려가면 goal 을 취소하고 ARRIVED 로 알린다.
+  - goal 을 '로봇->자동차 직선 위 standoff 앞' 에 두면 사이에 벽이 있을 때 goal 이 벽 앞에 찍힌다.
+    자동차 위치로 보내면 Nav2 가 벽을 돌아가는 경로를 만들고, 경로 길이로 도착을 판정한다.
+  - 이동 중에도 자동차가 goal_move_threshold 이상 움직이면 goal 을 다시 보낸다 (goal_period 간격 이상).
+  - 도착 뒤 자동차가 거의 그대로면 도착 상태를 유지하고, 많이 움직이면 다시 출발한다.
+로봇 위치는 TF(map -> base_link) 로 구한다.
+
+Nav2 가 실패하면(서버 없음/거절/abort) fallback_waypoints 를 거쳐 자동차 standoff 앞까지
 cmd_vel 로 직접 이동하고(모서리를 원호로 보간한 경로를 pure pursuit 로 추종),
 그 결과를 최종 상태로 쓴다.
 """
@@ -19,25 +26,23 @@ import math
 from typing import NamedTuple, Optional
 
 from action_msgs.msg import GoalStatus
-from geometry_msgs.msg import (
-    PointStamped, PoseStamped, PoseWithCovarianceStamped, TwistStamped)
+from geometry_msgs.msg import PointStamped, PoseStamped, TwistStamped
 from nav2_msgs.action import NavigateToPose
-from nav_msgs.msg import Odometry
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.action.client import ClientGoalHandle
 from rclpy.node import Node
-from rclpy.qos import (
-    DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data)
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.task import Future
+from rclpy.time import Time
 from std_msgs.msg import Empty, String
+from tf2_ros import Buffer, TransformException, TransformListener
 
 NODE_NAME = 'approach'
 SUBSCRIPTION_QUEUE_DEPTH = 10
 FALLBACK_PERIOD_SEC = 0.1
 
-# 늦게 구독한 노드(mission_manager)도 마지막 상태를 받고, AMCL 이 latched 로 발행한
-# 마지막 pose 도 받을 수 있도록 transient local 을 쓴다.
+# 늦게 구독한 노드(mission_manager)도 마지막 상태를 받을 수 있도록 transient local 을 쓴다.
 LATCHED_QOS = QoSProfile(
     depth=1,
     reliability=ReliabilityPolicy.RELIABLE,
@@ -106,50 +111,13 @@ def normalize_angle(angle: float) -> float:
     return (angle + math.pi) % (2.0 * math.pi) - math.pi
 
 
-def relative_pose(base: Pose2D, pose: Pose2D) -> Pose2D:
-    """기준 자세 base 의 좌표계에서 본 pose 의 상대 자세를 구한다."""
-    dx, dy = pose.x - base.x, pose.y - base.y
-    c, s = math.cos(base.yaw), math.sin(base.yaw)
-    return Pose2D(c * dx + s * dy, -s * dx + c * dy, normalize_angle(pose.yaw - base.yaw))
-
-
-def compose_pose(base: Pose2D, delta: Pose2D) -> Pose2D:
-    """기준 자세 base 에서 그 좌표계 기준 delta 만큼 움직인 자세를 구한다(relative_pose 의 역)."""
-    c, s = math.cos(base.yaw), math.sin(base.yaw)
-    return Pose2D(base.x + c * delta.x - s * delta.y,
-                  base.y + s * delta.x + c * delta.y,
-                  normalize_angle(base.yaw + delta.yaw))
-
-
-def compute_view_pose(
-    car: Point2D,
-    offset_x: float,
-    offset_y: float
-) -> Pose2D:
+def compute_goal_pose(robot: Point2D, car: Point2D) -> Pose2D:
     """
-    자동차 위치를 기준으로 OAK-D에서 잘 보이는 위치를 계산한다.
+    자동차 위치 자체를 goal 로 하고, 로봇에서 자동차를 바라보는 방향을 yaw 로 한다.
 
-    goal 위치:
-        goal_x = car_x + offset_x
-        goal_y = car_y + offset_y
-
-    yaw:
-        goal 위치에서 자동차를 바라보도록 계산
+    Nav2 는 경로상 standoff 거리가 남으면 취소되므로 실제로 자동차까지 가지는 않는다.
     """
-
-    goal_x = car.x + offset_x
-    goal_y = car.y + offset_y
-
-    yaw = math.atan2(
-        car.y - goal_y,
-        car.x - goal_x
-    )
-
-    return Pose2D(
-        goal_x,
-        goal_y,
-        yaw
-    )
+    return Pose2D(car.x, car.y, math.atan2(car.y - robot.y, car.x - robot.x))
 
 
 # --------------------------------------------------------------- cmd_vel route
@@ -267,6 +235,26 @@ def smooth_path(points: list[Point2D], corner_radius: float,
             for k in range(n + 1))
     corners.append(pts[-1])
     return _densify(corners, step)
+
+
+def trim_path_end(path: list[Point2D], length: float) -> list[Point2D]:
+    """
+    경로 끝에서 length [m] 만큼 잘라낸다. 경로가 length 보다 짧으면 시작점만 남긴다.
+
+    fallback 이 자동차 standoff 앞에서 멈추도록 자동차 위치까지의 경로를 자르는 데 쓴다.
+    """
+    keep = sum(math.hypot(b.x - a.x, b.y - a.y) for a, b in zip(path, path[1:])) - length
+    out = [path[0]]
+    for a, b in zip(path, path[1:]):
+        seg = math.hypot(b.x - a.x, b.y - a.y)
+        if seg >= keep:
+            if keep > 0.0:
+                t = keep / seg
+                out.append(Point2D(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t))
+            return out
+        keep -= seg
+        out.append(b)
+    return out
 
 
 def _approach(current: float, target: float, max_delta: float) -> float:
@@ -405,22 +393,23 @@ class ApproachParams:
     """
 
     nav_action: str = 'navigate_to_pose'
-    # TF 대신 amcl_pose 를 쓰면 namespace 별 TF 리매핑 없이 로봇 위치를 얻을 수 있다.
-    pose_topic: str = 'amcl_pose'
     target_topic: str = '/approach/target_point'
     cancel_topic: str = '/approach/cancel'
     status_topic: str = '/approach/status'
     map_frame: str = 'map'
+    # 로봇 위치는 TF map_frame -> base_frame 으로 구한다
+    base_frame: str = 'base_link'
 
-    # 자동차 기준, OAK-D가 잘 보이는 AMR 위치
-    view_offset_x: float = 0.6755
-    view_offset_y: float = 0.8150
+    # 경로상 자동차까지 이 거리 [m] 가 남으면 goal 을 취소하고 ARRIVED
+    standoff_distance: float = 1.0
+    # goal 재전송 최소 간격 [s]
+    goal_period: float = 0.5
+    # 자동차가 진행 중인 goal(또는 도착 위치)에서 이만큼 [m] 이상 움직여야 goal 을 다시 보낸다
+    goal_move_threshold: float = 0.2
 
     # Nav2 실패 시 cmd_vel 로 직접 이동 (fallback)
     fallback_enabled: bool = True
     cmd_vel_topic: str = 'cmd_vel'
-    # amcl_pose 갱신 사이의 이동을 odom 으로 보간한다.
-    odom_topic: str = 'odom'
     # 경로 시작점과 goal 전에 거칠 경로점 [x0, y0, x1, y1, ...] (map) [m]
     fallback_waypoints: tuple = (0.0, 0.0, 2.0, 0.0, 1.79, 1.77)
     # 경로점 모서리를 둥글게 보간하는 원호 반지름 [m]. 0 이면 꺾은선 그대로
@@ -433,8 +422,8 @@ class ApproachParams:
     fallback_position_tolerance: float = 0.03
     fallback_yaw_tolerance: float = 0.05
     fallback_heading_tolerance: float = 0.8
-    # odom 이 이 시간 동안 안 들어오면 정지 후 FAILED [s]
-    fallback_odom_timeout: float = 1.0
+    # TF 로 로봇 위치를 이 시간 동안 못 구하면 정지 후 FAILED [s]
+    fallback_pose_timeout: float = 1.0
     # fallback 전체 제한 시간 [s]
     fallback_timeout: float = 90.0
 
@@ -471,6 +460,10 @@ class ApproachParams:
         return cls(**values)
 
 
+def _distance(a: Point2D, b: Point2D) -> float:
+    return math.hypot(a.x - b.x, a.y - b.y)
+
+
 # ------------------------------------------------------------------------- node
 @dataclass
 class _GoalRequest:
@@ -478,7 +471,7 @@ class _GoalRequest:
     전송한 goal 한 건의 상태.
 
     콜백은 자신의 _GoalRequest 가 현재 활성 goal 인지 identity 로 비교해서,
-    교체된 이전 goal 의 응답/결과를 무시한다.
+    교체된 이전 goal 의 응답/feedback/결과를 무시한다.
     """
 
     car: Point2D
@@ -488,29 +481,27 @@ class _GoalRequest:
 
 
 class ApproachNode(Node):
-    """자동차 좌표를 받아 그 앞까지 Nav2 로 이동하고, 상태를 status 토픽으로 알린다."""
+    """자동차 좌표를 받아 standoff 앞까지 Nav2 로 이동하고, 상태를 status 토픽으로 알린다."""
 
     def __init__(self) -> None:
         super().__init__(NODE_NAME)
         self._params = ApproachParams.declare_and_load(self)
 
-        # map 자세 = 마지막 amcl_pose + (그 이후 odom 이동량)
-        self._amcl_pose: Optional[Pose2D] = None
-        self._odom_at_amcl: Optional[Pose2D] = None
-        self._odom_pose: Optional[Pose2D] = None
-        self._odom_stamp = None
+        self._tf_buffer = Buffer()
+        self._tf_listener = TransformListener(self._tf_buffer, self)
+
         self._active_goal: Optional[_GoalRequest] = None
+        self._last_send = None
+        # 도착 판정 당시 자동차 위치. 자동차가 여기서 많이 움직이면 다시 출발한다.
+        self._arrived_car: Optional[Point2D] = None
         self._status = ApproachStatus.IDLE
 
         self._waypoints = self._params.waypoints
         self._route: Optional[RouteFollower] = None
         self._route_started = None
+        self._last_pose_time = None
 
         self._nav = ActionClient(self, NavigateToPose, self._params.nav_action)
-        self.create_subscription(
-            PoseWithCovarianceStamped, self._params.pose_topic, self._on_pose, LATCHED_QOS)
-        self.create_subscription(
-            Odometry, self._params.odom_topic, self._on_odom, qos_profile_sensor_data)
         self.create_subscription(
             PointStamped, self._params.target_topic, self._on_target,
             SUBSCRIPTION_QUEUE_DEPTH)
@@ -526,6 +517,7 @@ class ApproachNode(Node):
         self.get_logger().info(
             f'approach ready: action={self._params.nav_action}, '
             f'target={self._params.target_topic}, cancel={self._params.cancel_topic}, '
+            f'standoff={self._params.standoff_distance}m, '
             f'fallback={self._params.fallback_enabled} '
             f'waypoints={[(p.x, p.y) for p in self._waypoints]}')
 
@@ -538,31 +530,39 @@ class ApproachNode(Node):
             self._publish_velocity(STOP)
 
     # ------------------------------------------------------------ callbacks
-    def _on_pose(self, msg: PoseWithCovarianceStamped) -> None:
-        pose = msg.pose.pose
-        o = pose.orientation
-        self._amcl_pose = Pose2D(
-            pose.position.x, pose.position.y,
-            quaternion_to_yaw(QuaternionXYZW(o.x, o.y, o.z, o.w)))
-        self._odom_at_amcl = self._odom_pose
-
-    def _on_odom(self, msg: Odometry) -> None:
-        pose = msg.pose.pose
-        o = pose.orientation
-        self._odom_pose = Pose2D(
-            pose.position.x, pose.position.y,
-            quaternion_to_yaw(QuaternionXYZW(o.x, o.y, o.z, o.w)))
-        self._odom_stamp = self.get_clock().now()
-        if self._odom_at_amcl is None:
-            self._odom_at_amcl = self._odom_pose
-
     def _on_target(self, msg: PointStamped) -> None:
         if not self._validate_target(msg):
             return
-        if self._status is ApproachStatus.MOVING:
-            self.get_logger().info('already moving, target ignored')
+        if self._route is not None:
+            return  # fallback 주행 중에는 목표를 바꾸지 않는다
+        car = Point2D(msg.point.x, msg.point.y)
+
+        # 이미 도착했고 자동차가 거의 그대로면 도착 상태 유지 (goal 재전송/취소 반복 방지)
+        if (self._arrived_car is not None
+                and _distance(car, self._arrived_car) < self._params.goal_move_threshold):
             return
-        self._send_goal(Point2D(msg.point.x, msg.point.y))
+
+        robot = self._robot_pose()
+        if robot is None:
+            self.get_logger().warning(
+                f'TF {self._params.map_frame}->{self._params.base_frame} 없음, target ignored',
+                throttle_duration_sec=3.0)
+            return
+
+        # 이미 standoff 안이면 goal 을 보내지 않고 도착으로 본다
+        straight = _distance(car, robot.position)
+        if straight < self._params.standoff_distance:
+            self._arrive(car, f'직선거리 {straight:.2f}m')
+            return
+
+        active = self._active_goal
+        if active is not None and _distance(car, active.car) <= self._params.goal_move_threshold:
+            return  # 진행 중인 goal 과 거의 같은 위치 -> 재전송하면 매번 경로 재계획
+        if (self._last_send is not None
+                and (self.get_clock().now() - self._last_send).nanoseconds / 1e9
+                < self._params.goal_period):
+            return
+        self._send_goal(car, robot)
 
     def _on_goal_response(self, future: Future, request: _GoalRequest) -> None:
         handle: ClientGoalHandle = future.result()
@@ -576,6 +576,14 @@ class ApproachNode(Node):
             return
         self._track_accepted_goal(request, handle)
 
+    def _on_feedback(self, msg, request: _GoalRequest) -> None:
+        if request is not self._active_goal:
+            return
+        remaining = msg.feedback.distance_remaining
+        # 경로 계획 전 feedback 은 0 이 올 수 있어 제외한다
+        if 0.01 < remaining < self._params.standoff_distance:
+            self._arrive(request.car, f'경로상 남은 거리 {remaining:.2f}m')
+
     def _on_result(self, future: Future, request: _GoalRequest) -> None:
         if request is not self._active_goal:
             return
@@ -583,6 +591,7 @@ class ApproachNode(Node):
         self._report_nav_result(future.result().status, request)
 
     def _on_cancel(self, _msg: Empty) -> None:
+        self._arrived_car = None
         if self._route is not None:
             self.get_logger().info('canceling fallback route')
             self._finish_route(ApproachStatus.CANCELED)
@@ -604,9 +613,22 @@ class ApproachNode(Node):
 
         return True
 
-    def _send_goal(self, car: Point2D) -> None:
-        goal_pose = compute_view_pose(car, self._params.view_offset_x, self._params.view_offset_y)
+    def _robot_pose(self) -> Optional[Pose2D]:
+        """TF map_frame -> base_frame 로 구한 로봇 자세. 없으면 None."""
+        try:
+            t = self._tf_buffer.lookup_transform(
+                self._params.map_frame, self._params.base_frame, Time())
+        except TransformException:
+            return None
+        q = t.transform.rotation
+        return Pose2D(t.transform.translation.x, t.transform.translation.y,
+                      quaternion_to_yaw(QuaternionXYZW(q.x, q.y, q.z, q.w)))
+
+    def _send_goal(self, car: Point2D, robot: Pose2D) -> None:
+        goal_pose = compute_goal_pose(robot.position, car)
         request = _GoalRequest(car=car, goal=goal_pose)
+        self._arrived_car = None
+        self._last_send = self.get_clock().now()
 
         if not self._nav.server_is_ready():
             self.get_logger().error('Nav2 action server not available')
@@ -619,15 +641,27 @@ class ApproachNode(Node):
         self._active_goal = request
 
         self.get_logger().info(
-            f'car=({car.x:.3f}, {car.y:.3f}) '
-            f'-> goal=({goal_pose.x:.3f}, {goal_pose.y:.3f}) '
-            f'yaw={goal_pose.yaw:.3f}'
-        )
+            f'car=({car.x:.3f}, {car.y:.3f}) goal sent '
+            f'(stop when {self._params.standoff_distance:.1f}m left on path)')
 
         self._set_status(ApproachStatus.MOVING)
 
-        future = self._nav.send_goal_async(goal_msg)
+        future = self._nav.send_goal_async(
+            goal_msg, feedback_callback=partial(self._on_feedback, request=request))
         future.add_done_callback(partial(self._on_goal_response, request=request))
+
+    def _arrive(self, car: Point2D, why: str) -> None:
+        """진행 중인 goal 을 취소하고 ARRIVED 를 알린다."""
+        request = self._active_goal
+        self._active_goal = None  # 취소 결과(CANCELED)는 _on_result 에서 무시된다
+        if request is not None:
+            request.cancel_requested = True
+            if request.handle is not None:
+                request.handle.cancel_goal_async()
+        self._arrived_car = car
+        if self._status is not ApproachStatus.ARRIVED:
+            self.get_logger().info(f'arrived ({why}): car=({car.x:.2f}, {car.y:.2f})')
+            self._set_status(ApproachStatus.ARRIVED)
 
     def _to_pose_stamped(self, pose: Pose2D) -> PoseStamped:
         q = yaw_to_quaternion(pose.yaw)
@@ -644,7 +678,7 @@ class ApproachNode(Node):
 
     # ---------------------------------------------------- goal lifecycle
     def _discard_stale_goal(self, handle: ClientGoalHandle) -> None:
-        # 응답 전에 새 goal 이 나갔다면, 뒤늦게 수락된 이 goal 이 로봇을 움직이지 않게 취소한다.
+        # 응답 전에 새 goal 이 나갔거나 도착 처리됐다면, 뒤늦게 수락된 이 goal 이 로봇을 움직이지 않게 취소한다.
         if handle.accepted:
             handle.cancel_goal_async()
 
@@ -673,6 +707,8 @@ class ApproachNode(Node):
             else:
                 self._fail_or_fallback(request)
             return
+        if status is ApproachStatus.ARRIVED:
+            self._arrived_car = request.car
         self._set_status(status)
 
     # --------------------------------------------------- cmd_vel fallback
@@ -680,23 +716,31 @@ class ApproachNode(Node):
         if not self._params.fallback_enabled:
             self._set_status(ApproachStatus.FAILED)
             return
-        robot = self._current_pose()
+        robot = self._robot_pose()
         if robot is None:
-            self.get_logger().error('fallback unavailable: no amcl_pose yet')
+            self.get_logger().error('fallback unavailable: no TF robot pose')
             self._set_status(ApproachStatus.FAILED)
             return
 
-        goal = request.goal
-        points = self._waypoints + [goal.position]
+        car = request.car
+        points = self._waypoints + [car]
         start = route_start_index(robot.position, points)
         path = smooth_path([robot.position] + points[start:], self._params.fallback_corner_radius)
+        # 자동차 standoff 앞에서 멈추고 마지막에 자동차를 바라본다
+        path = trim_path_end(path, self._params.standoff_distance)
+        if len(path) < 2:
+            self._arrive(car, 'fallback 경로가 standoff 보다 짧음')
+            return
+        end = path[-1]
+        final_yaw = math.atan2(car.y - end.y, car.x - end.x)
         self._route = RouteFollower(
-            path, goal.yaw, self._params.route_config, FALLBACK_PERIOD_SEC)
+            path, final_yaw, self._params.route_config, FALLBACK_PERIOD_SEC)
         self._route_started = self.get_clock().now()
+        self._last_pose_time = self._route_started
         self.get_logger().warning(
             f'Nav2 failed -> cmd_vel fallback from ({robot.x:.2f}, {robot.y:.2f}) via '
             f'{[(round(p.x, 2), round(p.y, 2)) for p in points[start:]]} '
-            f'yaw={goal.yaw:.2f}')
+            f'until {self._params.standoff_distance:.1f}m before car')
         # mission_manager 가 취소를 보낼 수 있도록 이동 중 상태를 유지한다.
         self._set_status(ApproachStatus.MOVING)
 
@@ -708,13 +752,15 @@ class ApproachNode(Node):
             self.get_logger().error('fallback route timed out')
             self._finish_route(ApproachStatus.FAILED)
             return
-        if (self._odom_stamp is None or (now - self._odom_stamp).nanoseconds / 1e9
-                > self._params.fallback_odom_timeout):
-            self.get_logger().error('fallback stopped: odom is stale')
-            self._finish_route(ApproachStatus.FAILED)
-            return
 
-        pose = self._current_pose()
+        pose = self._robot_pose()
+        if pose is None:
+            if (now - self._last_pose_time).nanoseconds / 1e9 > self._params.fallback_pose_timeout:
+                self.get_logger().error('fallback stopped: TF robot pose is stale')
+                self._finish_route(ApproachStatus.FAILED)
+            return
+        self._last_pose_time = now
+
         phase = self._route.phase
         velocity = self._route.step(pose)
         if self._route.phase is not phase:
@@ -730,13 +776,6 @@ class ApproachNode(Node):
         self._route = None
         self._publish_velocity(STOP)
         self._set_status(status)
-
-    def _current_pose(self) -> Optional[Pose2D]:
-        if self._amcl_pose is None:
-            return None
-        if self._odom_pose is None or self._odom_at_amcl is None:
-            return self._amcl_pose
-        return compose_pose(self._amcl_pose, relative_pose(self._odom_at_amcl, self._odom_pose))
 
     def _publish_velocity(self, velocity: Velocity) -> None:
         msg = TwistStamped()

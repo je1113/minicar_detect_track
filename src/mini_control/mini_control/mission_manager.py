@@ -1,18 +1,21 @@
 """
-웹캠 발견 → Nav2 접근 → AMR 카메라 인계 → 자동차 추종을 관리한다.
+웹캠 발견 → Nav2 접근 → AMR 카메라로 Nav2 추종 → 놓치면 360도 탐색을 관리한다.
 
 상태:
-SEARCHING
-APPROACHING
-HANDOVER
-FOLLOWING
-LOST
-DOCKING  (배터리 부족: 도크 앞까지 Nav2 이동 후 Dock 액션)
+SEARCHING    웹캠 좌표를 기다린다
+APPROACHING  웹캠 좌표(자동차 위치)를 approach 로 넘겨 Nav2 로 접근한다.
+             웹캠 좌표 근처에 처음 도착하기 전에는 AMR 카메라에 보여도 추종으로 넘어가지 않는다.
+FOLLOWING    AMR 카메라 bbox 방향 + depth 거리로 자동차 위치를 카메라 frame 에 만들고
+             TF 로 map 좌표로 바꿔 approach 로 넘긴다 → 추종 중에도 Nav2 가 장애물을 피한다.
+             approach 가 ARRIVED(경로상 standoff 이내)면 제자리 회전으로 자동차를 화면 가운데에 둔다.
+LOST         lost_timeout 동안 못 보면 approach 를 취소하고 마지막으로 본 쪽으로 제자리 360도 회전.
+             보이면 FOLLOWING, 한 바퀴 돌아도 없으면 웹캠 좌표로 다시 APPROACHING (없으면 SEARCHING).
+DOCKING      배터리 부족: 도크 앞까지 Nav2 이동 후 Dock 액션
 DOCKED
 
 approach 연결:
-  웹캠 좌표를 approach 목표 토픽으로 넘기고,
-  approach 상태(ARRIVED/FAILED/CANCELED)로 다음 상태를 정한다.
+  자동차 map 좌표를 approach 목표 토픽으로 계속 넘긴다. goal 재전송 간격/이동 임계값과
+  standoff 도착 판정은 approach 가 한다. 상태는 /approach/status 로 받는다.
 
 배터리:
   battery_low_threshold 미만이 되면 어떤 상태든 미션을 멈추고 DOCKING으로 간다.
@@ -27,22 +30,28 @@ from nav2_msgs.action import NavigateToPose
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.node import Node
+from rclpy.time import Time
 
 from geometry_msgs.msg import PointStamped, PoseStamped, TwistStamped
 from sensor_msgs.msg import BatteryState
 
 from std_msgs.msg import Empty, String
+from tf2_geometry_msgs import do_transform_point
+from tf2_ros import Buffer, TransformException, TransformListener
 from vision_msgs.msg import Detection2DArray
 
 from .approach import ApproachStatus
-from .follow import compute_velocity, stop_velocity
 
-# approach가 이동을 끝냈음을 뜻하는 상태
-APPROACH_FINISHED = (
-    ApproachStatus.ARRIVED,
-    ApproachStatus.FAILED,
-    ApproachStatus.CANCELED,
-)
+
+def _clamp(value, minimum, maximum):
+    return max(minimum, min(value, maximum))
+
+
+def _yaw_from_quaternion(q):
+    return math.atan2(
+        2.0 * (q.w * q.z + q.x * q.y),
+        1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+    )
 
 
 class MissionManager(Node):
@@ -89,34 +98,38 @@ class MissionManager(Node):
             'map'
         )
 
+        # 탐색 회전량을 잴 때 쓰는 frame (map 은 AMCL 보정으로 yaw 가 튈 수 있다)
+        self.declare_parameter(
+            'odom_frame',
+            'odom'
+        )
+
+        self.declare_parameter(
+            'base_frame',
+            'base_link'
+        )
+
+        # 감지 결과 header 에 frame_id 가 없을 때 쓰는 카메라 frame
+        self.declare_parameter(
+            'camera_frame',
+            'oakd_rgb_camera_optical_frame'
+        )
+
         self.declare_parameter(
             'image_width',
-            640
+            704
         )
 
+        # OAK-D RGB 수평 화각 [deg]. bbox 가로 위치 → 방향각 변환에 사용
         self.declare_parameter(
-            'target_distance',
-            0.8
+            'camera_hfov_deg',
+            69.0
         )
 
-        self.declare_parameter(
-            'min_distance',
-            0.5
-        )
-
-        self.declare_parameter(
-            'linear_gain',
-            0.5
-        )
-
+        # 도착(standoff 이내) 후 제자리 회전: 화면 중심 오차 → 회전 속도 gain
         self.declare_parameter(
             'angular_gain',
-            1.0
-        )
-
-        self.declare_parameter(
-            'max_linear_speed',
-            0.31
+            1.2
         )
 
         self.declare_parameter(
@@ -136,25 +149,30 @@ class MissionManager(Node):
             0.5
         )
 
-        # 자동차가 이 시간 동안 한 번도 감지되지 않아야 LOST로 간다 [s]
+        # 추종 중 자동차를 이 시간 동안 한 번도 못 보면 LOST [s]
+        # (그 전까지는 진행 중인 Nav2 goal 을 그대로 둔다)
         self.declare_parameter(
             'lost_timeout',
-            2.0
+            3.0
         )
 
-        # LOST 상태에서 자동차를 다시 찾을 때 제자리 회전 속도 [rad/s]
-        # 마지막으로 본 쪽으로 돈다. 본 적이 없으면 부호대로 돈다.
-        # 양수: 반시계(좌회전), 음수: 시계(우회전)
+        # LOST 360도 탐색 회전 속도 [rad/s]. 마지막으로 본 쪽으로 돈다.
+        # 빠르면 영상이 흔들려 YOLO 가 놓친다
         self.declare_parameter(
             'lost_angular_speed',
             0.03
         )
 
-        # approach가 도착(yaw 정렬까지 완료)한 뒤 정지한 채
-        # 자동차를 감지하며 기다리는 시간 [s]
+        # 회전량을 못 재는 경우(TF 없음 등) 대비 탐색 최대 시간 [s]
         self.declare_parameter(
-            'arrival_hold_time',
-            2.0
+            'lost_search_timeout',
+            25.0
+        )
+
+        # 웹캠 좌표가 이 시간 [s] 보다 오래되면 접근에 쓰지 않는다
+        self.declare_parameter(
+            'webcam_target_timeout',
+            4.0
         )
 
         # -----------------------------------------------------
@@ -212,182 +230,58 @@ class MissionManager(Node):
         # =====================================================
         # 2. 파라미터 읽기
         # =====================================================
+        p = self.get_parameter
 
-        self.target_position_topic = (
-            self.get_parameter(
-                'target_position_topic'
-            ).value
-        )
+        self.target_position_topic = p('target_position_topic').value
+        self.amr_detection_topic = p('amr_detection_topic').value
+        self.approach_target_topic = p('approach_target_topic').value
+        self.approach_cancel_topic = p('approach_cancel_topic').value
+        self.approach_status_topic = p('approach_status_topic').value
+        self.cmd_vel_topic = p('cmd_vel_topic').value
 
-        self.amr_detection_topic = (
-            self.get_parameter(
-                'amr_detection_topic'
-            ).value
-        )
+        self.map_frame = p('map_frame').value
+        self.odom_frame = p('odom_frame').value
+        self.base_frame = p('base_frame').value
+        self.camera_frame = p('camera_frame').value
 
-        self.approach_target_topic = (
-            self.get_parameter(
-                'approach_target_topic'
-            ).value
-        )
+        self.image_width = int(p('image_width').value)
+        self.camera_hfov = math.radians(float(p('camera_hfov_deg').value))
+        self.angular_gain = float(p('angular_gain').value)
+        self.max_angular_speed = float(p('max_angular_speed').value)
+        self.center_deadband_ratio = float(p('center_deadband_ratio').value)
 
-        self.approach_cancel_topic = (
-            self.get_parameter(
-                'approach_cancel_topic'
-            ).value
-        )
+        self.detection_timeout = float(p('detection_timeout').value)
+        self.lost_timeout = float(p('lost_timeout').value)
+        self.lost_angular_speed = float(p('lost_angular_speed').value)
+        self.lost_search_timeout = float(p('lost_search_timeout').value)
+        self.webcam_target_timeout = float(p('webcam_target_timeout').value)
 
-        self.approach_status_topic = (
-            self.get_parameter(
-                'approach_status_topic'
-            ).value
-        )
-
-        self.cmd_vel_topic = (
-            self.get_parameter(
-                'cmd_vel_topic'
-            ).value
-        )
-
-        self.map_frame = (
-            self.get_parameter(
-                'map_frame'
-            ).value
-        )
-
-        self.image_width = int(
-            self.get_parameter(
-                'image_width'
-            ).value
-        )
-
-        self.target_distance = float(
-            self.get_parameter(
-                'target_distance'
-            ).value
-        )
-
-        self.min_distance = float(
-            self.get_parameter(
-                'min_distance'
-            ).value
-        )
-
-        self.linear_gain = float(
-            self.get_parameter(
-                'linear_gain'
-            ).value
-        )
-
-        self.angular_gain = float(
-            self.get_parameter(
-                'angular_gain'
-            ).value
-        )
-
-        self.max_linear_speed = float(
-            self.get_parameter(
-                'max_linear_speed'
-            ).value
-        )
-
-        self.max_angular_speed = float(
-            self.get_parameter(
-                'max_angular_speed'
-            ).value
-        )
-
-        self.center_deadband_ratio = float(
-            self.get_parameter(
-                'center_deadband_ratio'
-            ).value
-        )
-
-        self.detection_timeout = float(
-            self.get_parameter(
-                'detection_timeout'
-            ).value
-        )
-
-        self.lost_timeout = float(
-            self.get_parameter(
-                'lost_timeout'
-            ).value
-        )
-
-        self.lost_angular_speed = float(
-            self.get_parameter(
-                'lost_angular_speed'
-            ).value
-        )
-
-        self.arrival_hold_time = float(
-            self.get_parameter(
-                'arrival_hold_time'
-            ).value
-        )
-
-        self.battery_topic = (
-            self.get_parameter(
-                'battery_topic'
-            ).value
-        )
-
-        self.battery_low_threshold = float(
-            self.get_parameter(
-                'battery_low_threshold'
-            ).value
-        )
-
-        self.dock_status_topic = (
-            self.get_parameter(
-                'dock_status_topic'
-            ).value
-        )
-
-        self.nav_action = (
-            self.get_parameter(
-                'nav_action'
-            ).value
-        )
-
-        self.dock_action = (
-            self.get_parameter(
-                'dock_action'
-            ).value
-        )
-
-        self.dock_staging_x = float(
-            self.get_parameter(
-                'dock_staging_x'
-            ).value
-        )
-
-        self.dock_staging_y = float(
-            self.get_parameter(
-                'dock_staging_y'
-            ).value
-        )
-
-        self.dock_staging_yaw = float(
-            self.get_parameter(
-                'dock_staging_yaw'
-            ).value
-        )
-
-        self.dock_max_retries = int(
-            self.get_parameter(
-                'dock_max_retries'
-            ).value
-        )
+        self.battery_topic = p('battery_topic').value
+        self.battery_low_threshold = float(p('battery_low_threshold').value)
+        self.dock_status_topic = p('dock_status_topic').value
+        self.nav_action = p('nav_action').value
+        self.dock_action = p('dock_action').value
+        self.dock_staging_x = float(p('dock_staging_x').value)
+        self.dock_staging_y = float(p('dock_staging_y').value)
+        self.dock_staging_yaw = float(p('dock_staging_yaw').value)
+        self.dock_max_retries = int(p('dock_max_retries').value)
 
         # =====================================================
         # 3. 상태값
         # =====================================================
         self.state = 'SEARCHING'
 
+        # 웹캠 자동차 map 좌표 (수신 시각 기준으로 최신성 판단)
+        self.webcam_target = None
+        self.webcam_target_time = None
+
+        # 웹캠 좌표 근처에 한 번이라도 도착했는지.
+        # 그 전에는 AMR 카메라에 보여도 추종으로 넘어가지 않는다.
+        self.arrived_once = False
+
         self.target_detected = False
         self.target_center_x = None
+        self.detection_frame = None
 
         # amr_detector가 /amr/detections에 넣어 주는 자동차까지 거리 [m]
         # depth 측정이 한 프레임 실패해도 직전 유효 거리를 잠시 쓴다.
@@ -396,18 +290,16 @@ class MissionManager(Node):
 
         self.last_detection_time = None
 
-        self.handover_start_time = None
+        # 제자리 회전 중 (cmd_vel 직접 발행 중)
+        self.rotating = False
 
-        # HANDOVER 진입 후 추종을 시작하지 않고 정지해 있을 시간 [s]
-        self.handover_hold_time = 0.0
+        # LOST 탐색 상태: {'dir', 'turned', 'prev_yaw', 'start'}
+        self.search = None
 
         # =====================================================
         # 4. approach 상태
         # =====================================================
         self.approach_status = None
-
-        # AMR 카메라가 먼저 자동차를 찾아 Nav2 취소를 요청한 상태
-        self.handover_cancel_requested = False
 
         # =====================================================
         # 4-1. 배터리 / 도킹 상태
@@ -431,6 +323,12 @@ class MissionManager(Node):
             Dock,
             self.dock_action
         )
+
+        # =====================================================
+        # 4-2. TF (카메라 → map 변환, 탐색 회전량)
+        # =====================================================
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
 
         # =====================================================
         # 5. approach Publisher
@@ -524,21 +422,41 @@ class MissionManager(Node):
             )
             return
 
-        # 첫 자동차 위치만 approach에 전달
-        if self.state != 'SEARCHING':
+        self.webcam_target = msg
+        self.webcam_target_time = self.get_clock().now()
+
+        if self.state == 'SEARCHING':
+            self.start_approach('SEARCHING')
             return
 
-        self.get_logger().info(
-            f'car map position=({msg.point.x:.3f}, '
-            f'{msg.point.y:.3f})'
+        # 접근 중에는 최신 좌표를 계속 넘긴다
+        # (자동차가 움직이면 approach가 goal을 다시 보낸다)
+        if self.state == 'APPROACHING':
+            self.approach_target_pub.publish(msg)
+
+    def webcam_target_is_fresh(self):
+
+        return (
+            self.webcam_target is not None
+            and self.seconds_since(self.webcam_target_time)
+            <= self.webcam_target_timeout
         )
 
-        self.approach_target_pub.publish(msg)
+    # =========================================================
+    # 웹캠 좌표로 접근 시작
+    # =========================================================
+    def start_approach(self, from_state):
+
+        self.stop_rotation()
 
         self.state = 'APPROACHING'
 
+        self.approach_target_pub.publish(self.webcam_target)
+
         self.get_logger().info(
-            'SEARCHING -> APPROACHING'
+            f'{from_state} -> APPROACHING '
+            f'(car map=({self.webcam_target.point.x:.3f}, '
+            f'{self.webcam_target.point.y:.3f}))'
         )
 
     # =========================================================
@@ -556,69 +474,17 @@ class MissionManager(Node):
 
         self.approach_status = status
 
-        if self.state != 'APPROACHING':
-            return
+        # FAILED / CANCELED 는 다음 좌표가 오면 approach가 goal을 다시 보낸다
+        if (
+            self.state == 'APPROACHING'
+            and status == ApproachStatus.ARRIVED
+            and not self.arrived_once
+        ):
+            self.arrived_once = True
 
-        if status not in APPROACH_FINISHED:
-            return
-
-        # AMR 카메라가 이미 자동차를 보고 있으므로
-        # Nav2가 어떻게 끝났든 추종 인계로 넘어간다.
-        if self.handover_cancel_requested:
-            self.handover_cancel_requested = False
-            self.notify_approach_complete()
-            return
-
-        # 도착 후 자세가 잡힌 상태에서 잠시 멈춰 감지한다
-        if status == ApproachStatus.ARRIVED:
-            self.notify_approach_complete(
-                hold_time=self.arrival_hold_time
+            self.get_logger().info(
+                '웹캠 좌표 도착: AMR 카메라에 자동차가 보이면 추종 시작'
             )
-            return
-
-        self.state = 'SEARCHING'
-
-        self.get_logger().warning(
-            f'APPROACHING -> SEARCHING (approach {status.value})'
-        )
-
-    # =========================================================
-    # approach 이동 취소 요청
-    # =========================================================
-    def cancel_approach(self):
-
-        self.handover_cancel_requested = True
-
-        self.approach_cancel_pub.publish(Empty())
-
-        self.get_logger().info(
-            'AMR 카메라 감지, approach 취소 요청'
-        )
-
-    # =========================================================
-    # 접근 완료 → AMR 카메라 인계
-    # =========================================================
-    def notify_approach_complete(self, hold_time=0.0):
-
-        if self.state != 'APPROACHING':
-            return
-
-        self.start_handover('APPROACHING', hold_time)
-
-    # =========================================================
-    # HANDOVER 진입: 정지 후 hold_time이 지나고 자동차가 보이면 추종한다
-    # =========================================================
-    def start_handover(self, from_state, hold_time=0.0):
-
-        self.state = 'HANDOVER'
-        self.handover_start_time = self.get_clock().now()
-        self.handover_hold_time = hold_time
-
-        self.stop_robot()
-
-        self.get_logger().info(
-            f'{from_state} -> HANDOVER (hold {hold_time:.1f}s)'
-        )
 
     # =========================================================
     # AMR 카메라 감지 결과
@@ -657,6 +523,8 @@ class MissionManager(Node):
             detection.bbox.center.position.x
         )
 
+        self.detection_frame = msg.header.frame_id or self.camera_frame
+
         distance = float(
             detection.results[0].pose.pose.position.z
         )
@@ -677,18 +545,9 @@ class MissionManager(Node):
         self.get_logger().info(
             f'AMR car detected: '
             f'x={self.target_center_x:.1f}, '
-            f'score={score:.2f}'
-        )
-
-    # =========================================================
-    # 추종 시작
-    # =========================================================
-    def start_following(self, from_state):
-
-        self.state = 'FOLLOWING'
-
-        self.get_logger().info(
-            f'{from_state} -> FOLLOWING'
+            f'dist={self.distance}, '
+            f'score={score:.2f}',
+            throttle_duration_sec=1.0
         )
 
     # =========================================================
@@ -710,18 +569,119 @@ class MissionManager(Node):
             <= self.detection_timeout
         )
 
+    # 지금 자동차가 보이고 거리도 유효한지
+    def car_is_visible(self):
+
+        return (
+            self.target_detected
+            and self.detection_is_fresh()
+            and self.seconds_since(self.distance_time)
+            <= self.detection_timeout
+        )
+
+    # 화면 가로 위치 오차: -1(왼쪽) ~ 1(오른쪽)
+    def horizontal_error(self):
+
+        center = self.image_width / 2.0
+
+        return (self.target_center_x - center) / center
+
     # =========================================================
-    # lost_timeout 동안 자동차를 한 번도 못 봤는지 확인
+    # AMR 감지 → 자동차 map 좌표 (TF 변환)
+    #
+    # bbox 가로 위치를 화각으로 방향각으로 바꾸고, depth(광축 방향 거리)로
+    # 카메라 frame 의 점을 만든 뒤 TF 로 map 으로 변환한다.
+    # 카메라와 로봇의 시계가 다를 수 있어 최신 TF 를 쓴다.
     # =========================================================
-    def target_is_lost(self, since=None):
+    def car_map_position(self):
 
-        elapsed = self.seconds_since(self.last_detection_time)
+        lateral = (
+            self.distance
+            * self.horizontal_error()
+            * math.tan(self.camera_hfov / 2.0)
+        )
 
-        # HANDOVER는 진입 시각부터 기다린다
-        if since is not None:
-            elapsed = min(elapsed, self.seconds_since(since))
+        point = PointStamped()
+        point.header.frame_id = self.detection_frame
 
-        return elapsed > self.lost_timeout
+        if self.detection_frame.endswith('optical_frame'):
+            # optical: x 오른쪽, y 아래, z 앞
+            point.point.x = lateral
+            point.point.z = self.distance
+        else:
+            # 일반 ROS frame: x 앞, y 왼쪽
+            point.point.x = self.distance
+            point.point.y = -lateral
+
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                self.map_frame,
+                self.detection_frame,
+                Time()
+            )
+        except TransformException as e:
+            self.get_logger().warning(
+                f'TF {self.map_frame}->{self.detection_frame} 없음: {e}',
+                throttle_duration_sec=3.0
+            )
+            return None
+
+        car = do_transform_point(point, transform)
+        car.header.frame_id = self.map_frame
+        car.header.stamp = self.get_clock().now().to_msg()
+
+        return car
+
+    def odom_yaw(self):
+
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                self.odom_frame,
+                self.base_frame,
+                Time()
+            )
+        except TransformException:
+            return None
+
+        return _yaw_from_quaternion(transform.transform.rotation)
+
+    # =========================================================
+    # 추종 시작 / LOST 탐색 시작
+    # =========================================================
+    def start_following(self, from_state):
+
+        self.state = 'FOLLOWING'
+
+        self.get_logger().info(
+            f'{from_state} -> FOLLOWING (Nav2로 추종)'
+        )
+
+    def start_search(self):
+
+        # 진행 중인 Nav2 goal 취소 (제자리 회전과 충돌 방지)
+        self.approach_cancel_pub.publish(Empty())
+
+        # 마지막에 오른쪽에서 봤으면 시계 방향
+        direction = 1.0
+        if (
+            self.target_center_x is not None
+            and self.horizontal_error() > 0.0
+        ):
+            direction = -1.0
+
+        self.search = {
+            'dir': direction,
+            'turned': 0.0,
+            'prev_yaw': self.odom_yaw(),
+            'start': self.get_clock().now(),
+        }
+
+        self.state = 'LOST'
+
+        self.get_logger().warning(
+            f'FOLLOWING -> LOST ({self.lost_timeout:.0f}초간 못 봄, '
+            f'{"시계" if direction < 0 else "반시계"} 방향 360도 탐색)'
+        )
 
     # =========================================================
     # 배터리 상태 수신
@@ -941,59 +901,13 @@ class MissionManager(Node):
         # -----------------------------------------------------
         # APPROACHING
         #
-        # 이 상태에서는 Nav2 / approach.py가 제어한다.
-        # cmd_vel을 여기서 보내지 않는다.
+        # Nav2 / approach.py가 제어한다. cmd_vel을 여기서 보내지 않는다.
+        # 웹캠 좌표에 한 번 도착한 뒤 AMR 카메라에 보이면 추종한다.
         # -----------------------------------------------------
         if self.state == 'APPROACHING':
 
-            # approach가 MOVING을 알리기 전에 취소하면 무시되므로 기다린다.
-            if (
-                not self.handover_cancel_requested
-                and self.approach_status == ApproachStatus.MOVING
-                and self.target_detected
-                and self.detection_is_fresh()
-            ):
-                self.cancel_approach()
-
-            return
-
-        # -----------------------------------------------------
-        # HANDOVER
-        # -----------------------------------------------------
-        if self.state == 'HANDOVER':
-
-            # hold_time 동안은 감지만 하고 정지해 있는다
-            holding = (
-                self.seconds_since(self.handover_start_time)
-                < self.handover_hold_time
-            )
-
-            # hold가 끝난 뒤 자동차가 보이면 바로 추종
-            if (
-                not holding
-                and self.target_detected
-                and self.detection_is_fresh()
-            ):
-                self.approach_cancel_pub.publish(
-                    Empty()
-                )
-
-                self.start_following('HANDOVER')
-
-                return
-
-            self.stop_robot()
-
-            if holding:
-                return
-
-            # 멈춘 뒤 lost_timeout 동안 자동차가 안 보이면 다시 회전하며 찾는다
-            if self.target_is_lost(since=self.handover_start_time):
-                self.state = 'LOST'
-
-                self.get_logger().warning(
-                    'HANDOVER -> LOST'
-                )
+            if self.arrived_once and self.car_is_visible():
+                self.start_following('APPROACHING')
 
             return
 
@@ -1002,48 +916,27 @@ class MissionManager(Node):
         # -----------------------------------------------------
         if self.state == 'FOLLOWING':
 
-            # lost_timeout 동안 한 번도 못 봤을 때만 LOST
-            if self.target_is_lost():
-                self.state = 'LOST'
-
-                self.stop_robot()
-
-                self.get_logger().warning(
-                    'FOLLOWING -> LOST'
-                )
-
+            if self.seconds_since(self.last_detection_time) > self.lost_timeout:
+                self.stop_rotation()
+                self.start_search()
                 return
 
-            # 잠깐 놓쳤거나 거리가 오래되면 멈춰서 다시 보일 때까지 기다린다
-            if (
-                not self.detection_is_fresh()
-                or self.seconds_since(self.distance_time)
-                > self.detection_timeout
-            ):
-
-                self.stop_robot()
-
+            # 잠깐 놓친 경우(lost_timeout 이내)는 진행 중인 Nav2 goal을 그대로 둔다
+            if not self.car_is_visible():
+                self.stop_rotation()
                 return
 
-            # 직전 감지(detection_timeout 이내)로 계속 추종한다
-            linear_x, angular_z = compute_velocity(
-                target_detected=True,
-                target_center_x=self.target_center_x,
-                image_width=self.image_width,
-                distance=self.distance,
-                target_distance=self.target_distance,
-                min_distance=self.min_distance,
-                linear_gain=self.linear_gain,
-                angular_gain=self.angular_gain,
-                max_linear_speed=self.max_linear_speed,
-                max_angular_speed=self.max_angular_speed,
-                center_deadband=self.center_deadband_ratio,
-            )
+            car = self.car_map_position()
 
-            self.publish_velocity(
-                linear_x,
-                angular_z
-            )
+            if car is not None:
+                self.approach_target_pub.publish(car)
+
+            # standoff 이내: 이동 없이 제자리 회전으로 화면 가운데 유지
+            # Nav2가 움직이는 중에는 cmd_vel을 보내지 않는다
+            if self.approach_status == ApproachStatus.ARRIVED:
+                self.rotate_to_center()
+            else:
+                self.stop_rotation()
 
             return
 
@@ -1051,38 +944,88 @@ class MissionManager(Node):
         # LOST
         # -----------------------------------------------------
         if self.state == 'LOST':
-
-            # 자동차가 한 번이라도 보이면 바로 추종
-            if (
-                self.target_detected
-                and self.detection_is_fresh()
-            ):
-                self.start_following('LOST')
-
-                return
-
-            # 찾을 때까지 마지막으로 본 쪽으로 제자리 회전
-            self.publish_velocity(
-                0.0,
-                self.lost_search_angular_speed()
-            )
-
+            self.search_step()
             return
 
     # =========================================================
-    # LOST 회전 방향: 화면 왼쪽에서 사라졌으면 좌회전, 오른쪽이면 우회전
+    # 도착 후 제자리 회전: 자동차를 화면 가운데에 둔다
     # =========================================================
-    def lost_search_angular_speed(self):
+    def rotate_to_center(self):
 
-        if self.target_center_x is None:
-            return self.lost_angular_speed
+        error = self.horizontal_error()
 
-        speed = abs(self.lost_angular_speed)
+        angular_z = 0.0
 
-        if self.target_center_x < self.image_width / 2.0:
-            return speed
+        if abs(error) > self.center_deadband_ratio:
+            angular_z = _clamp(
+                -self.angular_gain * error,
+                -self.max_angular_speed,
+                self.max_angular_speed,
+            )
 
-        return -speed
+        self.publish_velocity(0.0, angular_z)
+
+        self.rotating = angular_z != 0.0
+
+    def stop_rotation(self):
+
+        if self.rotating:
+            self.stop_robot()
+            self.rotating = False
+
+    # =========================================================
+    # LOST: 제자리 360도 회전 탐색
+    # =========================================================
+    def search_step(self):
+
+        if self.car_is_visible():
+            self.stop_rotation()
+            self.search = None
+            self.get_logger().info('탐색 회전 중 자동차 발견')
+            self.start_following('LOST')
+            return
+
+        st = self.search
+
+        yaw = self.odom_yaw()
+
+        if yaw is not None and st['prev_yaw'] is not None:
+            d = math.atan2(
+                math.sin(yaw - st['prev_yaw']),
+                math.cos(yaw - st['prev_yaw'])
+            )
+            st['turned'] += abs(d)
+
+        if yaw is not None:
+            st['prev_yaw'] = yaw
+
+        if (
+            st['turned'] >= 2.0 * math.pi
+            or self.seconds_since(st['start']) > self.lost_search_timeout
+        ):
+            self.stop_rotation()
+            self.search = None
+
+            self.get_logger().warning(
+                f'{math.degrees(st["turned"]):.0f}도 회전했지만 자동차 못 찾음'
+            )
+
+            if self.webcam_target_is_fresh():
+                self.start_approach('LOST')
+            else:
+                self.state = 'SEARCHING'
+                self.get_logger().warning(
+                    'LOST -> SEARCHING (웹캠 좌표 대기)'
+                )
+
+            return
+
+        self.publish_velocity(
+            0.0,
+            st['dir'] * abs(self.lost_angular_speed)
+        )
+
+        self.rotating = True
 
     # =========================================================
     # 속도 명령 발행
@@ -1116,12 +1059,7 @@ class MissionManager(Node):
     # =========================================================
     def stop_robot(self):
 
-        linear_x, angular_z = stop_velocity()
-
-        self.publish_velocity(
-            linear_x,
-            angular_z
-        )
+        self.publish_velocity(0.0, 0.0)
 
 
 def main(args=None):

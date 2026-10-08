@@ -43,11 +43,11 @@ controller_server:
       debug_trajectory_details: True
       min_vel_x: 0.0
       min_vel_y: 0.0
-      max_vel_x: 0.26
+      max_vel_x: 0.2
       max_vel_y: 0.0
       max_vel_theta: 1.0
       min_speed_xy: 0.0
-      max_speed_xy: 0.26
+      max_speed_xy: 0.2
       min_speed_theta: 0.0
       acc_lim_x: 2.5
       acc_lim_y: 0.0
@@ -127,6 +127,7 @@ local_costmap:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: true
       always_send_full_costmap: true
+      transform_tolerance: 1.0
 
 global_costmap:
   global_costmap:
@@ -169,6 +170,7 @@ global_costmap:
         cost_scaling_factor: 4.0
         inflation_radius: 0.45
       always_send_full_costmap: true
+      transform_tolerance: 1.0
 
 planner_server:
   ros__parameters:

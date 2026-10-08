@@ -23,46 +23,48 @@ mission_manager:
     map_frame: "map"
 
     # =====================================================
-    # Following
+    # Following (Nav2 추종)
+    #
+    # AMR 카메라 bbox 방향 + depth 거리 → 카메라 frame 점 → TF → map 좌표
+    # → approach 로 넘겨 Nav2 goal. 경로상 standoff_distance(approach) 이내면
+    # 제자리 회전으로 화면 가운데 유지.
     # =====================================================
 
-    # AMR 카메라 영상 가로 크기
-    image_width: 640
+    # AMR 카메라 영상 가로 크기 (amr_detector 영상 704x704)
+    image_width: 704
 
-    # 추종할 때 자동차와 유지할 목표 거리 [m]
-    target_distance: 0.8
+    # OAK-D RGB 수평 화각 [deg]
+    camera_hfov_deg: 69.0
 
-    # 이 거리보다 가까우면 전진하지 않음 [m]
-    min_distance: 0.5
+    # 감지 결과 header 에 frame_id 가 없을 때 쓰는 카메라 frame
+    camera_frame: "oakd_rgb_camera_optical_frame"
+    base_frame: "base_link"
+    odom_frame: "odom"
 
-    # 거리 오차 → 직진 속도 gain
-    linear_gain: 0.5
-
-    # 이미지 중심 오차 → 회전 속도 gain
-    angular_gain: 1.0
-
-    # 최대 속도
-    max_linear_speed: 0.31
+    # 도착 후 제자리 회전: 이미지 중심 오차 → 회전 속도 gain, 최대 회전 속도
+    angular_gain: 1.2
     max_angular_speed: 1.0
 
-    # 자동차 중심이 화면 가운데 이 비율 안에 있으면 회전하지 않는다 (0.333 = 가운데 1/3)
+    # 자동차 중심이 화면 가운데 이 비율 안에 있으면 회전하지 않음 (0.333 = 가운데 1/3)
     center_deadband_ratio: 0.333
 
     # 마지막 자동차 감지를 유효하게 보는 시간 [s]
     detection_timeout: 0.5
 
-    # 이 시간 동안 자동차를 한 번도 못 보면 LOST [s]
-    # (detection_timeout 이후 lost_timeout 전까지는 멈춰서 기다린다)
-    lost_timeout: 2.0
+    # 추종 중 이 시간 동안 자동차를 한 번도 못 보면 LOST (360도 탐색) [s]
+    # 그 전까지는 진행 중인 Nav2 goal 을 그대로 둔다
+    lost_timeout: 3.0
 
-    # LOST 상태에서 자동차를 다시 찾을 때 제자리 회전 속도 [rad/s]
-    # 마지막으로 본 쪽으로 돈다. 본 적이 없으면 부호대로 돈다.
-    # 양수: 반시계(좌회전), 음수: 시계(우회전)
+    # LOST 360도 탐색 회전 속도 [rad/s]. 마지막으로 본 쪽으로 돈다.
+    # 빠르면 영상이 흔들려 YOLO 가 놓친다
     lost_angular_speed: 0.03
 
-    # approach 도착(yaw 정렬 완료) 후 정지한 채 자동차를 감지하며 기다리는 시간 [s]
-    # 이 시간이 지난 뒤 자동차가 보이면 추종, 계속 안 보이면 LOST
-    arrival_hold_time: 2.0
+    # 회전량을 못 재는 경우(TF 없음 등) 대비 탐색 최대 시간 [s]
+    lost_search_timeout: 25.0
+
+    # 웹캠 좌표가 이 시간보다 오래되면 접근에 쓰지 않음 [s]
+    # 한 바퀴 탐색해도 못 찾았을 때 웹캠 좌표가 신선하면 다시 접근, 아니면 SEARCHING
+    webcam_target_timeout: 4.0
 
     # =====================================================
     # Battery / Docking
@@ -95,40 +97,41 @@ approach:
     # =====================================================
 
     nav_action: "/robot2/navigate_to_pose"
-    pose_topic: "/robot2/amcl_pose"
 
     # mission_manager 인터페이스
     target_topic: "/approach/target_point"
     cancel_topic: "/approach/cancel"
     status_topic: "/approach/status"
 
+    # 로봇 위치: TF map_frame -> base_frame
     map_frame: "map"
+    base_frame: "base_link"
 
     # =====================================================
-    # 자동차를 보기 좋은 AMR 위치
+    # 자동차 위치로 goal → 경로상 standoff 남으면 취소
     # =====================================================
 
-    # car 위치 기준 AMR goal offset [m]
-    #
-    # 테스트:
-    # car ≈ (-0.0355, 1.025)
-    # AMR  ≈ (0.64, 1.84)
-    #
-    view_offset_x: 0.6755
-    view_offset_y: 0.8150
+    # Nav2 feedback 의 경로상 남은 거리가 이보다 작으면 goal 취소 후 ARRIVED [m]
+    standoff_distance: 1.0
+
+    # goal 재전송 최소 간격 [s]
+    goal_period: 0.5
+
+    # 자동차가 진행 중 goal(또는 도착 위치)에서 이만큼 움직여야 goal 재전송 [m]
+    goal_move_threshold: 0.2
+
     # =====================================================
     # Nav2 실패 시 cmd_vel fallback
     #
-    # Nav2 가 실패하면 아래 경로점을 거쳐 goal 까지 이동한다.
+    # Nav2 가 실패하면 아래 경로점을 거쳐 자동차 standoff 앞까지 이동한다.
     # 경로점 모서리를 원호로 둥글게 보간하고 pure pursuit 로 곡선 주행하며,
     # 속도는 가감속 한계 안에서 매 주기 보간한다.
-    #   (0,0) → (2,0) 좌회전 → (1.79,1.77) 좌회전 → goal
+    #   (0,0) → (2,0) 좌회전 → (1.79,1.77) 좌회전 → 자동차 (standoff 앞에서 정지)
     # =====================================================
 
     fallback_enabled: true
 
     cmd_vel_topic: "/robot2/cmd_vel"
-    odom_topic: "/robot2/odom"
 
     # 경로 시작점 + goal 전에 거칠 경로점 [x0, y0, x1, y1, ...] (map) [m]
     # 로봇에서 가장 가까운 구간의 끝점부터 이어서 간다.
@@ -143,5 +146,5 @@ approach:
     fallback_position_tolerance: 0.03 # goal 도착 판정 [m]
     fallback_yaw_tolerance: 0.05      # 회전 완료 판정 [rad]
     fallback_heading_tolerance: 0.8   # 주행 중 이보다 틀어지면 감속 후 제자리 회전 [rad]
-    fallback_odom_timeout: 1.0        # [s]
+    fallback_pose_timeout: 1.0        # TF 로봇 위치를 이 시간 못 구하면 FAILED [s]
     fallback_timeout: 90.0            # [s]

@@ -12,11 +12,13 @@
 | mini_control | `approach` | 목표 좌표로 Nav2 이동 → `/approach/status` |
 | mini_control | `mission_manager` | 상태 전환 및 자동차 추종 → `/robot2/cmd_vel` |
 
-상태 흐름: `SEARCHING → APPROACHING → HANDOVER → FOLLOWING ⇄ LOST`
+상태 흐름: `SEARCHING → APPROACHING → FOLLOWING ⇄ LOST` (LOST에서 못 찾으면 `APPROACHING`/`SEARCHING`)
 
-- 웹캠이 자동차를 찾으면 approach로 접근한다 (APPROACHING).
-- 도착하거나, 이동 중 AMR 카메라가 자동차를 보면 Nav2를 취소하고 HANDOVER로 넘어간다.
-- AMR 카메라에서 `handover_detection_count`번 연속 감지되면 FOLLOWING으로 추종을 시작한다.
+- 웹캠이 자동차를 찾으면 자동차 map 좌표를 approach로 넘긴다 (APPROACHING). 자동차가 움직이면 좌표를 계속 넘긴다.
+- approach는 **자동차 위치 자체를 Nav2 goal**로 보내고, feedback의 경로상 남은 거리가 `standoff_distance`(1m) 아래가 되면 goal을 취소하고 `ARRIVED`를 알린다. 로봇 위치는 TF(`map → base_link`)로 구한다.
+- 웹캠 좌표에 한 번 도착한 뒤 AMR 카메라에 자동차가 보이면 FOLLOWING으로 간다 (도착 전에는 보여도 접근을 계속한다).
+- FOLLOWING: bbox 가로 위치(화각 69°) + depth 거리로 카메라 frame 점을 만들고, TF로 map 좌표로 바꿔 approach로 넘긴다 → 추종 중에도 Nav2가 장애물을 피한다. standoff 안이면 제자리 회전으로 자동차를 화면 가운데에 둔다.
+- `lost_timeout`(3초) 동안 못 보면 approach를 취소하고 마지막으로 본 쪽으로 360도 회전한다 (LOST). 보이면 FOLLOWING, 한 바퀴 돌아도 없으면 웹캠 좌표로 다시 접근한다.
 - 추종 거리는 `amr_detector`가 `/amr/detections`의 `results[0].pose.pose.position.z`에 넣어 준 depth 거리를 쓴다.
 
 ## 통합 테스트
@@ -39,7 +41,7 @@ source install/setup.bash
 `system.launch.py`가 위치 추정(`localization.launch.py`), Nav2(`nav2.launch.py`), RViz(`view_navigation.launch.py`)를 같이 실행한다.
 맵은 `mini_control/maps/arena_map.yaml`, Nav2 파라미터는 `mini_control/config/nav2.yaml`(TurtleBot4 기본값에서 global costmap `inflation_radius`만 0.05로 변경)을 쓴다.
 
-launch 후 RViz에서 "2D Pose Estimate"로 초기 위치를 지정해야 `/robot2/amcl_pose`가 나오고 approach가 동작한다.
+launch 후 RViz에서 "2D Pose Estimate"로 초기 위치를 지정해야 `map → base_link` TF가 나오고 approach가 동작한다.
 
 비전/제어 노드만 다시 띄울 때 초기 위치를 매번 다시 잡지 않으려면, 위치 추정·Nav2·RViz를 따로 띄워 두고 system.launch에서는 끈다.
 
@@ -70,7 +72,7 @@ ros2 launch mini_control system.launch.py
 인자 변경 예:
 
 ```bash
-ros2 launch mini_control system.launch.py camera_index:=0 target_distance:=0.8 max_linear_speed:=0.2
+ros2 launch mini_control system.launch.py camera_index:=0 standoff_distance:=1.0
 ```
 
 | 인자 | 기본값 | 설명 |
@@ -84,15 +86,14 @@ ros2 launch mini_control system.launch.py camera_index:=0 target_distance:=0.8 m
 | `camera_index` | `2` | 고정 웹캠 번호 (`ls /dev/video*`로 확인) |
 | `amr_camera_topic` | `/robot2/oakd/rgb/image_raw/compressed` | AMR 카메라 토픽 (depth는 `stereo/image_raw/compressedDepth`, 둘 다 704x704) |
 | `cmd_vel_topic` | `/robot2/cmd_vel` | 추종 속도 명령 토픽 |
-| `target_distance` | `0.8` | 추종 시 유지할 거리 [m] |
-| `min_distance` | `0.5` | 이 거리 이하면 전진 정지 (회전은 유지) [m] |
-| `max_linear_speed` | `0.31` | 최대 전진 속도 [m/s] |
+| `standoff_distance` | `1.0` | 경로상 자동차까지 이 거리가 남으면 Nav2 goal 취소 [m] |
+| `angular_gain` | `1.2` | 도착 후 제자리 회전 gain |
 | `max_angular_speed` | `1.0` | 최대 회전 속도 [rad/s] |
 | `detection_timeout` | `0.5` | 감지 결과 유효 시간 [s] |
-| `handover_detection_count` | `3` | 추종 전환에 필요한 연속 감지 횟수 |
 
 - `amr_detector`는 감지 창을 띄우므로(`show_window: True`) 디스플레이가 있는 환경에서 실행한다.
-- `mission_manager`의 `image_width`(기본 640)가 AMR 영상의 가로 폭(704)과 같아야 회전 계산이 맞다.
+- `mission_manager`의 `image_width`(기본 704)가 AMR 영상의 가로 폭과 같아야 방향각 계산이 맞다.
+- approach / mission_manager는 TF를 쓰므로 launch에서 `/tf`, `/tf_static`을 `<namespace>/tf`로 리매핑한다.
 
 ### 4. 동작 확인
 
@@ -114,7 +115,8 @@ ros2 topic pub --once /target/map_position geometry_msgs/msg/PointStamped \
   "{header: {frame_id: map}, point: {x: 1.0, y: 0.5, z: 0.0}}"
 ```
 
-이동 중 AMR 카메라에 자동차가 보이면 approach가 취소되고 HANDOVER로 넘어가야 정상이다.
+경로상 1m 남으면 approach가 goal을 취소하고 `ARRIVED`를 알려야 정상이다 (`ros2 topic echo /approach/status`).
+그 뒤 AMR 카메라에 자동차가 보이면 `APPROACHING -> FOLLOWING`으로 넘어간다.
 
 ### 정지
 

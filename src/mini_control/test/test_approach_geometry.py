@@ -3,51 +3,59 @@ import math
 
 from mini_control.approach import (
     ApproachStatus,
-    compute_view_pose,
+    compute_goal_pose,
     Point2D,
     quaternion_to_yaw,
+    trim_path_end,
     yaw_to_quaternion,
 )
 import pytest
 
-VIEW_OFFSET_X = 0.6755
-VIEW_OFFSET_Y = 0.8150
 
-
-def test_goal_is_car_position_plus_offset():
+def test_goal_is_car_position():
     car = Point2D(-0.0355, 1.025)
 
-    goal = compute_view_pose(car, VIEW_OFFSET_X, VIEW_OFFSET_Y)
+    goal = compute_goal_pose(Point2D(2.0, 2.0), car)
 
-    assert goal.x == pytest.approx(car.x + VIEW_OFFSET_X)
-    assert goal.y == pytest.approx(car.y + VIEW_OFFSET_Y)
-
-
-def test_goal_does_not_depend_on_car_heading_or_distance():
-    near = compute_view_pose(Point2D(0.0, 0.0), VIEW_OFFSET_X, VIEW_OFFSET_Y)
-    far = compute_view_pose(Point2D(10.0, -5.0), VIEW_OFFSET_X, VIEW_OFFSET_Y)
-
-    assert far.x - near.x == pytest.approx(10.0)
-    assert far.y - near.y == pytest.approx(-5.0)
-    assert far.yaw == pytest.approx(near.yaw)
+    assert (goal.x, goal.y) == pytest.approx((car.x, car.y))
 
 
-@pytest.mark.parametrize('offset_x, offset_y, expected_yaw', [
-    (-1.0, -1.0, math.pi / 4),           # goal 이 3사분면 쪽 → 1사분면 방향을 봄
-    (1.0, -1.0, 3 * math.pi / 4),
-    (1.0, 1.0, -3 * math.pi / 4),
-    (-1.0, 1.0, -math.pi / 4),
-    (-1.0, 0.0, 0.0),                    # +x 축
-    (0.0, -1.0, math.pi / 2),            # +y 축
+@pytest.mark.parametrize('robot, expected_yaw', [
+    (Point2D(1.0, 3.0), 0.0),                 # 로봇이 -x 쪽 → +x 방향을 봄
+    (Point2D(2.0, 2.0), math.pi / 2),
+    (Point2D(3.0, 4.0), -3 * math.pi / 4),
 ])
-def test_goal_yaw_faces_car(offset_x, offset_y, expected_yaw):
-    car = Point2D(2.0, 3.0)
-
-    goal = compute_view_pose(car, offset_x, offset_y)
+def test_goal_yaw_faces_car_from_robot(robot, expected_yaw):
+    goal = compute_goal_pose(robot, Point2D(2.0, 3.0))
 
     assert goal.yaw == pytest.approx(expected_yaw)
-    heading_to_car = math.atan2(car.y - goal.y, car.x - goal.x)
-    assert goal.yaw == pytest.approx(heading_to_car)
+
+
+def path_length(path):
+    return sum(math.hypot(b.x - a.x, b.y - a.y) for a, b in zip(path, path[1:]))
+
+
+def test_trim_path_end_removes_standoff_length():
+    path = [Point2D(0.0, 0.0), Point2D(2.0, 0.0), Point2D(2.0, 2.0)]
+
+    trimmed = trim_path_end(path, 1.0)
+
+    assert path_length(trimmed) == pytest.approx(3.0)
+    assert trimmed[-1] == pytest.approx(Point2D(2.0, 1.0))
+
+
+def test_trim_path_end_cuts_inside_earlier_segment():
+    path = [Point2D(0.0, 0.0), Point2D(2.0, 0.0), Point2D(2.0, 0.5)]
+
+    trimmed = trim_path_end(path, 1.0)
+
+    assert trimmed[-1] == pytest.approx(Point2D(1.5, 0.0))
+
+
+def test_trim_path_end_shorter_than_standoff_keeps_start_only():
+    path = [Point2D(0.0, 0.0), Point2D(0.5, 0.0)]
+
+    assert trim_path_end(path, 1.0) == [Point2D(0.0, 0.0)]
 
 
 @pytest.mark.parametrize('yaw', [

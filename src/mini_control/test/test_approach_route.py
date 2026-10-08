@@ -2,12 +2,10 @@
 import math
 
 from mini_control.approach import (
-    compose_pose,
     distance_to_segment,
     normalize_angle,
     Point2D,
     Pose2D,
-    relative_pose,
     route_start_index,
     RouteConfig,
     RouteFollower,
@@ -55,26 +53,6 @@ def distance_to_route(p):
 ])
 def test_normalize_angle(angle, expected):
     assert normalize_angle(angle) == pytest.approx(expected)
-
-
-def test_compose_is_inverse_of_relative():
-    base = Pose2D(1.0, -2.0, 0.7)
-    pose = Pose2D(-0.5, 3.0, -2.5)
-
-    restored = compose_pose(base, relative_pose(base, pose))
-
-    assert restored == pytest.approx(pose)
-
-
-def test_odom_delta_is_applied_in_map_frame():
-    # map 에서 +y 를 보는 로봇이 odom 상 전진 1m 하면 map 에서는 +y 로 1m
-    amcl = Pose2D(1.0, 1.0, math.pi / 2)
-    odom_at_amcl = Pose2D(5.0, 5.0, 0.0)
-    odom_now = Pose2D(6.0, 5.0, 0.0)
-
-    pose = compose_pose(amcl, relative_pose(odom_at_amcl, odom_now))
-
-    assert pose == pytest.approx(Pose2D(1.0, 2.0, math.pi / 2))
 
 
 @pytest.mark.parametrize('robot, expected', [
